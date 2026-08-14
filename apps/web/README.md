@@ -1,6 +1,6 @@
 # Receivables Operator web
 
-Next.js 16 application for Firebase owner authentication, first-business onboarding, and the Phase 1 tenant-aware dashboard.
+Next.js 16 application for Firebase owner authentication, business onboarding, consent-gated invoice extraction/review, invoice monitoring, and constrained agent decision review.
 
 Copy `.env.example` to `.env.local`, run the Firebase emulators and API from the repository root, then start this workspace with `npm run dev --workspace=web`.
 

@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,6 +26,14 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     firebase_auth_emulator_host: str | None = None
     firestore_emulator_host: str | None = None
+    gemini_api_key: SecretStr | None = None
+    gemini_model: str = "gemini-3.6-flash"
+    extraction_prompt_version: str = "invoice-extraction-v1"
+    decision_prompt_version: str = "collection-decision-v1"
+    policy_version: str = "collection-policy-v1"
+    max_pdf_bytes: int = Field(default=10 * 1024 * 1024, ge=1024)
+    max_pdf_pages: int = Field(default=25, ge=1, le=1000)
+    gemini_timeout_seconds: int = Field(default=45, ge=5, le=110)
 
     @property
     def cors_origins(self) -> list[str]:

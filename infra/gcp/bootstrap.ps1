@@ -11,7 +11,7 @@ if (-not (Get-Command gcloud -ErrorAction SilentlyContinue)) {
 }
 
 gcloud config set project $ProjectId
-gcloud services enable run.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com firestore.googleapis.com firebase.googleapis.com secretmanager.googleapis.com cloudkms.googleapis.com billingbudgets.googleapis.com
+gcloud services enable run.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com firestore.googleapis.com firebase.googleapis.com secretmanager.googleapis.com cloudkms.googleapis.com billingbudgets.googleapis.com generativelanguage.googleapis.com
 
 $repository = gcloud artifacts repositories describe cashsathi --location $Region --format "value(name)" 2>$null
 if (-not $repository) {
@@ -29,6 +29,7 @@ foreach ($service in @("cashsathi-api", "cashsathi-web")) {
 $apiAccount = "cashsathi-api@$ProjectId.iam.gserviceaccount.com"
 gcloud projects add-iam-policy-binding $ProjectId --member "serviceAccount:$apiAccount" --role roles/datastore.user --condition None
 gcloud projects add-iam-policy-binding $ProjectId --member "serviceAccount:$apiAccount" --role roles/logging.logWriter --condition None
+gcloud secrets add-iam-policy-binding gemini-api-key --member "serviceAccount:$apiAccount" --role roles/secretmanager.secretAccessor
 
 $webAccount = "cashsathi-web@$ProjectId.iam.gserviceaccount.com"
 gcloud projects add-iam-policy-binding $ProjectId --member "serviceAccount:$webAccount" --role roles/logging.logWriter --condition None

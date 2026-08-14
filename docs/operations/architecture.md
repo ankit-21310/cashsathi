@@ -8,6 +8,7 @@ Use a monorepo with a Next.js web service and FastAPI API service deployed indep
 Browser -> Firebase Auth
 Browser -> Cloud Run web
 Browser -- Firebase ID token --> Cloud Run API -- IAM --> Firestore
+Cloud Run API -- API key from Secret Manager --> Gemini API
 ```
 
 ## Tenant invariant
@@ -32,6 +33,17 @@ Exact transitive versions are recorded in `package-lock.json` and `services/api/
 - `businesses/{businessId}/members/{uid}`: role and active status.
 - `settings/{businessId}`: policy defaults in minor units.
 - `evidence_events/{eventId}`: append-oriented evidence envelope.
+- `businesses/{businessId}/consents/{consentId}`: append-only versioned consent grants.
+- `businesses/{businessId}/customers/{customerId}`: customer identity and manual-only policy.
+- `businesses/{businessId}/invoices/{invoiceId}`: user-confirmed invoice facts only.
+- `businesses/{businessId}/agent_runs/{runId}`: validated proposals and policy outcomes.
+- `businesses/{businessId}/actions/{actionId}`: proposed or approval-gated external actions.
+
+## Phase 2–3 operating boundary
+
+The API validates PDF uploads to 10 MiB and 25 pages, sends bytes inline to Gemini, returns an editable draft, and discards the bytes. Confirmation uses the immutable extraction event as provenance and as the idempotency key. Date-derived invoice state is calculated at read/evaluation time in Asia/Kolkata rather than stored as stale state.
+
+Gemini only proposes a structured decision. Deterministic code applies paid, dispute, missing-data, cooldown, high-value, non-INR, manual-only, legal-language, and missing-email safeguards before an append-oriented agent run or action proposal is stored. Phase 3 never executes an external action.
 
 ## Consequences
 

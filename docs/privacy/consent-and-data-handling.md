@@ -18,6 +18,8 @@ This operational template is not legal advice. Obtain jurisdiction-specific revi
 
 Required: yes. Record version, timestamp, user ID, business ID, and source.
 
+Implementation: the API returns the canonical statement and current version, records an append-only grant before the first upload, and re-gates processing whenever the version changes. The browser cannot bypass this check because the extraction endpoint verifies consent server-side.
+
 ## Anonymized metrics consent
 
 > I separately agree that de-identified usage and outcome metrics may be aggregated for product evaluation and competition reporting. No invoice, customer, or business identity will be disclosed through this permission.
@@ -42,3 +44,11 @@ Required: no. Default: not granted. This must not be bundled with product access
 - Structured operational records: retained while the account is active and then deleted through the documented deletion process.
 - Audit/evidence exports: retain only for the disclosed competition or compliance purpose.
 - Failed diagnostics: sanitized and time-limited; no raw document payloads.
+
+## Phase 2–3 enforcement
+
+- PDF extension, MIME type, signature, structure, encryption, size, and page count are checked before Gemini processing.
+- PDFs are sent inline rather than through a retained file API and are released when the request completes.
+- Extraction events contain only model/version, latency, token counts, byte/page counts, validation status, and warning codes.
+- Decision prompts omit customer names, email addresses, invoice text, PDFs, and reminder bodies.
+- Agent runs retain validated decisions and policy results, never full prompts or raw model responses.

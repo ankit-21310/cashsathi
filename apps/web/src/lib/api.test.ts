@@ -70,4 +70,24 @@ describe("API client", () => {
       requestId: "req-1",
     });
   });
+
+  it("lets the browser set the multipart boundary for FormData", async () => {
+    const getIdToken = vi.fn().mockResolvedValue("firebase-token");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ extraction_id: "ext-1" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const body = new FormData();
+    body.set("file", new File(["pdf"], "invoice.pdf", { type: "application/pdf" }));
+
+    await apiFetch({ getIdToken } as unknown as User, "/api/invoices/extract", {
+      method: "POST",
+      body,
+    });
+
+    const headers = new Headers(fetchMock.mock.calls[0][1]?.headers);
+    expect(headers.has("Content-Type")).toBe(false);
+  });
 });

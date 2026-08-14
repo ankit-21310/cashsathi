@@ -23,6 +23,7 @@ Every material workflow transition emits one event with:
 Required event types:
 
 - `business.created`
+- `consent.granted`
 - `invoice.extraction_completed`
 - `invoice.confirmed`
 - `agent.decision_created`

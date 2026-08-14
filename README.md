@@ -2,7 +2,7 @@
 
 CashSathi is the internal codename for a constrained AI accounts-receivable operator for Indian micro and small businesses. Public builds default to **Receivables Operator Preview** until the product name receives formal clearance.
 
-This repository currently implements Phase 0 (product, evidence, safety, and validation foundations) and Phase 1 (authentication, tenant isolation, Firestore access, observability, and deployable web/API shells). Invoice extraction and the deployed Gemini operating loop begin in Phase 2.
+This repository implements Phases 0–3: product/safety foundations, authentication and tenant isolation, consent-gated transient PDF extraction, user-confirmed invoices, deterministic invoice states, constrained Gemini decisions, and policy-controlled action proposals. Gmail execution remains Phase 4.
 
 ## Repository
 
@@ -17,10 +17,11 @@ Prerequisites: Node.js 24, Python 3.13 managed by `uv`, and Java 21+ for Firebas
 
 1. Copy `apps/web/.env.example` to `apps/web/.env.local`.
 2. Copy `services/api/.env.example` to `services/api/.env`.
-3. Run `npm ci` and `uv sync --directory services/api --all-groups`.
-4. Start Firebase emulators with `npm run emulators`.
-5. In another terminal, seed two isolated tenants with `npm run seed`.
-6. Start the applications with `npm run dev`.
+3. Add a Gemini API key to `services/api/.env` to use extraction and decisioning; the rest of the application and automated tests run without it.
+4. Run `npm ci` and `uv sync --directory services/api --all-groups`.
+5. Start Firebase emulators with `npm run emulators`.
+6. In another terminal, seed two isolated tenants with `npm run seed`.
+7. Start the applications with `npm run dev`.
 
 Web: <http://localhost:3000>  
 API: <http://localhost:8000>  

@@ -2,6 +2,7 @@
 
 import { ReactNode, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 
 import { useAuth } from "@/components/auth-provider";
 import { Brand } from "@/components/brand";
@@ -19,7 +20,11 @@ export function AuthenticatedShell({ children }: { children: ReactNode }) {
   return (
     <div className="app-shell">
       <header className="app-header">
-        <Brand />
+        <div className="app-navigation">
+          <Link href="/dashboard"><Brand /></Link>
+          <Link href="/dashboard">Invoices</Link>
+          <Link href="/invoices/new">Upload</Link>
+        </div>
         <div className="user-actions">
           <span>{user.email}</span>
           <button
