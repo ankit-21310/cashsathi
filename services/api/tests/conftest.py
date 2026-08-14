@@ -24,6 +24,7 @@ class TestAuthVerifier:
         users = {
             "alice-token": AuthenticatedUser("alice", "alice@example.com", "Alice"),
             "bob-token": AuthenticatedUser("bob", "bob@example.com", "Bob"),
+            "charlie-token": AuthenticatedUser("charlie", "charlie@example.com", "Charlie"),
         }
         if token not in users:
             raise ApiError(401, "invalid_token", "The authentication token is invalid or expired.")

@@ -72,6 +72,7 @@ jobs:
       - run: npm run lint:api
       - run: npm run typecheck:api
       - run: npm run test:api
+      - run: uv run --directory services/api python scripts/verify_phase8.py --structure-only
 
   containers:
     runs-on: ubuntu-latest

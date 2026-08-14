@@ -5,19 +5,28 @@ import hashlib
 import io
 import json
 import zipfile
+from collections import defaultdict
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from cashsathi_api.domain import (
     AccountExport,
+    Business,
+    BusinessRelationship,
     ConsentEventAction,
+    DataClassification,
+    EvidenceLedgerEntry,
     FounderPlanEnrollment,
+    Interview,
+    LedgerKind,
     MembershipRole,
     OptionalConsentDefinition,
     OptionalConsentEvent,
     OptionalConsentResponse,
     OptionalConsentType,
+    Prospect,
+    ProspectStatus,
     TenantContext,
 )
 from cashsathi_api.errors import ApiError
@@ -40,6 +49,25 @@ OPTIONAL_CONSENTS: dict[OptionalConsentType, tuple[str, str]] = {
         "in the selected channels.",
     ),
 }
+
+SUBMISSION_REPORT_MONTHS = tuple(date(2026, month, 1) for month in range(5, 9))
+EVIDENCE_README = """CashSathi sanitized evidence export - schema version 2
+
+Money is stored as integer minor units and currencies are never converted. The monthly P&L
+covers May through August 2026. Revenue is separated into arms-length, related-party,
+pre-existing, and unclassified categories; unclassified revenue must not be claimed as
+arms-length demand. Reversals are applied only when their original ledger entry exists.
+
+Operational metrics come from confirmed invoices, validated agent runs, recorded action
+results, and owner-confirmed payments. A payment recorded after an action establishes timing,
+not causation. Testimonials and identity fields appear only while the corresponding consent
+grant is active. Business and invoice references are pseudonymous or hashed, and this archive
+does not include business names, customer identities, reminder bodies, OAuth data, receipt
+references, or raw model/provider responses.
+
+Source collections: businesses, prospects, interviews, founder plans, evidence ledger,
+agent runs, actions, payments, and active optional-consent events.
+"""
 
 
 def statement_hash(consent_type: OptionalConsentType) -> str:
@@ -128,17 +156,192 @@ def _collect_pages[T](
             return items
 
 
+def _entry_amount(entry: EvidenceLedgerEntry, entries_by_id: dict[str, EvidenceLedgerEntry]) -> int:
+    if entry.reversal_of and entry.reversal_of not in entries_by_id:
+        return 0
+    return -entry.amount_minor if entry.reversal_of else entry.amount_minor
+
+
+def _revenue_bucket(entry: EvidenceLedgerEntry, businesses: dict[str, Business]) -> str:
+    business = businesses.get(entry.business_id or "")
+    if business is None:
+        return "unclassified_revenue_minor"
+    if (
+        business.data_classification == DataClassification.REAL
+        and business.relationship == BusinessRelationship.ARMS_LENGTH
+    ):
+        return "arms_length_revenue_minor"
+    if business.relationship == BusinessRelationship.RELATED:
+        return "related_party_revenue_minor"
+    if business.relationship == BusinessRelationship.PREEXISTING:
+        return "preexisting_revenue_minor"
+    return "unclassified_revenue_minor"
+
+
+def _monthly_pnl_rows(
+    ledger: list[EvidenceLedgerEntry], businesses: list[Business]
+) -> list[dict[str, Any]]:
+    business_by_id = {business.id: business for business in businesses}
+    entries_by_id = {entry.id: entry for entry in ledger}
+    currencies = sorted({entry.currency for entry in ledger} or {"INR"})
+    rows: dict[tuple[str, str], dict[str, int]] = {
+        (month.isoformat()[:7], currency): {
+            "arms_length_revenue_minor": 0,
+            "related_party_revenue_minor": 0,
+            "preexisting_revenue_minor": 0,
+            "unclassified_revenue_minor": 0,
+            "total_product_revenue_minor": 0,
+            "expenses_minor": 0,
+            "marketing_spend_minor": 0,
+            "net_minor": 0,
+        }
+        for month in SUBMISSION_REPORT_MONTHS
+        for currency in currencies
+    }
+    for entry in ledger:
+        month = entry.occurred_on.isoformat()[:7]
+        row = rows.get((month, entry.currency))
+        if row is None:
+            continue
+        amount = _entry_amount(entry, entries_by_id)
+        if entry.kind == LedgerKind.EXPENSE:
+            row["expenses_minor"] += amount
+            if entry.marketing:
+                row["marketing_spend_minor"] += amount
+            continue
+        row[_revenue_bucket(entry, business_by_id)] += amount
+
+    for row in rows.values():
+        row["total_product_revenue_minor"] = sum(
+            row[key]
+            for key in (
+                "arms_length_revenue_minor",
+                "related_party_revenue_minor",
+                "preexisting_revenue_minor",
+                "unclassified_revenue_minor",
+            )
+        )
+        row["net_minor"] = row["total_product_revenue_minor"] - row["expenses_minor"]
+    return [
+        {"month": month, "currency": currency, **values}
+        for (month, currency), values in rows.items()
+    ]
+
+
+def _net_revenue_by_business(
+    ledger: list[EvidenceLedgerEntry], businesses: list[Business]
+) -> dict[str, int]:
+    business_by_id = {business.id: business for business in businesses}
+    entries_by_id = {entry.id: entry for entry in ledger}
+    totals: dict[str, int] = defaultdict(int)
+    for entry in ledger:
+        if (
+            entry.kind != LedgerKind.PRODUCT_REVENUE
+            or entry.business_id not in business_by_id
+            or entry.occurred_on < SUBMISSION_REPORT_MONTHS[0]
+            or entry.occurred_on >= date(2026, 9, 1)
+        ):
+            continue
+        totals[entry.business_id] += _entry_amount(entry, entries_by_id)
+    return totals
+
+
+def _customer_breakdown_rows(
+    businesses: list[Business],
+    prospects: list[Prospect],
+    interview_counts: dict[str, int],
+    ledger: list[EvidenceLedgerEntry],
+) -> list[dict[str, Any]]:
+    segments_by_business: dict[str, set[str]] = defaultdict(set)
+    for prospect in prospects:
+        if prospect.linked_business_id:
+            segments_by_business[prospect.linked_business_id].add(prospect.segment.strip())
+
+    def business_segment(business_id: str) -> str:
+        segments = segments_by_business.get(business_id, set())
+        if not segments:
+            return "Unspecified"
+        if len(segments) > 1:
+            return "Multiple"
+        return next(iter(segments))
+
+    rows: dict[str, dict[str, Any]] = {}
+
+    def row_for(segment: str) -> dict[str, Any]:
+        return rows.setdefault(
+            segment,
+            {
+                "segment": segment,
+                "prospects": 0,
+                "interviews": 0,
+                "design_partners": 0,
+                "converted_prospects": 0,
+                "linked_real_businesses": 0,
+                "arms_length_businesses": 0,
+                "related_businesses": 0,
+                "preexisting_businesses": 0,
+                "unclassified_or_demo_businesses": 0,
+                "arms_length_paying_businesses": 0,
+            },
+        )
+
+    for prospect in prospects:
+        row = row_for(prospect.segment.strip())
+        row["prospects"] += 1
+        row["interviews"] += interview_counts.get(prospect.id, 0)
+        if prospect.status == ProspectStatus.DESIGN_PARTNER:
+            row["design_partners"] += 1
+        if prospect.status == ProspectStatus.CONVERTED:
+            row["converted_prospects"] += 1
+
+    net_revenue = _net_revenue_by_business(ledger, businesses)
+    for business in businesses:
+        row = row_for(business_segment(business.id))
+        if business.data_classification == DataClassification.REAL:
+            row["linked_real_businesses"] += 1
+        if (
+            business.data_classification == DataClassification.REAL
+            and business.relationship == BusinessRelationship.ARMS_LENGTH
+        ):
+            row["arms_length_businesses"] += 1
+            if net_revenue.get(business.id, 0) > 0:
+                row["arms_length_paying_businesses"] += 1
+        elif business.relationship == BusinessRelationship.RELATED:
+            row["related_businesses"] += 1
+        elif business.relationship == BusinessRelationship.PREEXISTING:
+            row["preexisting_businesses"] += 1
+        else:
+            row["unclassified_or_demo_businesses"] += 1
+    return [rows[segment] for segment in sorted(rows, key=str.casefold)]
+
+
 def build_evidence_zip(repo: Repository, record_limit: int) -> bytes:
     businesses = _collect_pages(repo.list_businesses_page, record_limit)
     plans = _collect_pages(repo.list_founder_plans, record_limit)
     ledger = _collect_pages(repo.list_ledger_entries_page, record_limit)
+    prospects = _collect_pages(repo.list_prospects, record_limit)
+    interview_counts: dict[str, int] = {}
+    interviews_total = 0
+    for prospect in prospects:
+
+        def fetch_interviews(
+            limit: int, cursor: str | None, prospect_id: str = prospect.id
+        ) -> tuple[list[Interview], str | None]:
+            return repo.list_interviews(prospect_id, limit, cursor)
+
+        interviews = _collect_pages(
+            fetch_interviews,
+            record_limit,
+        )
+        interview_counts[prospect.id] = len(interviews)
+        interviews_total += len(interviews)
     business_rows: list[dict[str, Any]] = []
     run_rows: list[dict[str, Any]] = []
     action_rows: list[dict[str, Any]] = []
     payment_rows: list[dict[str, Any]] = []
     testimonial_rows: list[dict[str, Any]] = []
     identity_rows: list[dict[str, Any]] = []
-    total = len(businesses) + len(plans) + len(ledger)
+    total = len(businesses) + len(plans) + len(ledger) + len(prospects) + interviews_total
     if total > record_limit:
         raise ApiError(413, "export_limit_exceeded", "The evidence export exceeds its limit.")
     pseudonym_by_business = {
@@ -248,12 +451,40 @@ def build_evidence_zip(repo: Repository, record_limit: int) -> bytes:
         }
         for entry in ledger
     ]
+    pnl_rows = _monthly_pnl_rows(ledger, businesses)
+    customer_breakdown_rows = _customer_breakdown_rows(
+        businesses, prospects, interview_counts, ledger
+    )
+    excluded_ledger_entries = sum(
+        1
+        for entry in ledger
+        if entry.occurred_on < SUBMISSION_REPORT_MONTHS[0] or entry.occurred_on >= date(2026, 9, 1)
+    )
+    export_filenames = [
+        "manifest.json",
+        "scoreboard.json",
+        "submission_metrics.json",
+        "README.txt",
+        "businesses.csv",
+        "agent_runs.csv",
+        "actions.csv",
+        "payments.csv",
+        "founder_plans.csv",
+        "ledger.csv",
+        "pnl_by_month.csv",
+        "customer_breakdown.csv",
+        "testimonials.csv",
+        "identities.csv",
+    ]
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": datetime.now(UTC).isoformat(),
         "complete": True,
         "record_limit": record_limit,
         "records": total,
+        "report_period": {"starts_on": "2026-05-01", "ends_on": "2026-08-31"},
+        "files": export_filenames,
+        "excluded_ledger_entries_outside_report_period": excluded_ledger_entries,
         "privacy": "Pseudonymous operational evidence; consent-gated testimonials and identity.",
         "collection_counts": {
             "businesses": len(business_rows),
@@ -262,6 +493,8 @@ def build_evidence_zip(repo: Repository, record_limit: int) -> bytes:
             "payments": len(payment_rows),
             "founder_plans": len(plan_rows),
             "ledger": len(ledger_rows),
+            "prospects": len(prospects),
+            "interviews": interviews_total,
             "testimonials": len(testimonial_rows),
             "identities": len(identity_rows),
         },
@@ -269,10 +502,73 @@ def build_evidence_zip(repo: Repository, record_limit: int) -> bytes:
     from cashsathi_api.evidence import admin_impact
 
     scoreboard = admin_impact(repo).model_dump(mode="json")
+    pnl_totals: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for row in pnl_rows:
+        currency = str(row["currency"])
+        for field in (
+            "arms_length_revenue_minor",
+            "related_party_revenue_minor",
+            "preexisting_revenue_minor",
+            "unclassified_revenue_minor",
+            "expenses_minor",
+            "marketing_spend_minor",
+        ):
+            pnl_totals[field][currency] += int(row[field])
+    period_net_revenue = _net_revenue_by_business(ledger, businesses)
+    arms_length_paying = {
+        business.id
+        for business in businesses
+        if business.data_classification == DataClassification.REAL
+        and business.relationship == BusinessRelationship.ARMS_LENGTH
+        and period_net_revenue.get(business.id, 0) > 0
+    }
+    related_paying = {
+        business.id
+        for business in businesses
+        if business.relationship == BusinessRelationship.RELATED
+        and period_net_revenue.get(business.id, 0) > 0
+    }
+    preexisting_paying = {
+        business.id
+        for business in businesses
+        if business.relationship == BusinessRelationship.PREEXISTING
+        and period_net_revenue.get(business.id, 0) > 0
+    }
+    submission_metrics = {
+        "schema_version": 1,
+        "generated_at": manifest["generated_at"],
+        "report_period": manifest["report_period"],
+        "business_viability": {
+            "arms_length_paying_businesses": len(arms_length_paying),
+            "related_paying_businesses": len(related_paying),
+            "preexisting_paying_businesses": len(preexisting_paying),
+            "arms_length_revenue_by_currency": dict(pnl_totals["arms_length_revenue_minor"]),
+            "related_revenue_by_currency": dict(pnl_totals["related_party_revenue_minor"]),
+            "preexisting_revenue_by_currency": dict(pnl_totals["preexisting_revenue_minor"]),
+            "unclassified_revenue_by_currency": dict(pnl_totals["unclassified_revenue_minor"]),
+            "expenses_by_currency": dict(pnl_totals["expenses_minor"]),
+            "marketing_spend_by_currency": dict(pnl_totals["marketing_spend_minor"]),
+        },
+        "customer_validation": {
+            "prospects": scoreboard["prospects"],
+            "interviews": scoreboard["interviews"],
+            "design_partners": scoreboard["design_partners"],
+            "converted_prospects": scoreboard["converted_prospects"],
+            "consented_testimonials": scoreboard["consented_testimonials"],
+        },
+        "operational": scoreboard["operational"],
+        "claim_boundaries": [
+            "Demo, related-party, pre-existing, and arms-length results remain separate.",
+            "Post-action payments show timing after a logged action, not causation.",
+            "Only active, channel-scoped testimonial and identity consents are exported.",
+        ],
+    }
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("manifest.json", json.dumps(manifest, indent=2))
         archive.writestr("scoreboard.json", json.dumps(scoreboard, indent=2))
+        archive.writestr("submission_metrics.json", json.dumps(submission_metrics, indent=2))
+        archive.writestr("README.txt", EVIDENCE_README)
         for filename, rows in (
             ("businesses.csv", business_rows),
             ("agent_runs.csv", run_rows),
@@ -280,6 +576,8 @@ def build_evidence_zip(repo: Repository, record_limit: int) -> bytes:
             ("payments.csv", payment_rows),
             ("founder_plans.csv", plan_rows),
             ("ledger.csv", ledger_rows),
+            ("pnl_by_month.csv", pnl_rows),
+            ("customer_breakdown.csv", customer_breakdown_rows),
             ("testimonials.csv", testimonial_rows),
             ("identities.csv", identity_rows),
         ):

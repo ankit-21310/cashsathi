@@ -25,6 +25,8 @@
     "test:web": "npm run test --workspace=web",
     "test:api": "uv run --directory services/api pytest",
     "test:e2e": "npm run test:e2e --workspace=web",
+    "verify:phase8:structure": "uv run --directory services/api python scripts/verify_phase8.py --structure-only",
+    "verify:phase8": "npm run lint && npm run typecheck && npm test && npm run build && uv run --directory services/api python scripts/verify_phase8.py --release --quality-gates-passed",
     "emulators": "firebase emulators:start --project cashsathi-local --import .firebase-data --export-on-exit .firebase-data",
     "seed": "uv run --directory services/api python scripts/seed_emulator.py"
   },

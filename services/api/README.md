@@ -1,6 +1,6 @@
 # CashSathi API
 
-The Phase 6–7 API adds streamed JSON/PDF size enforcement, route deadlines, Firestore fixed-window limits, strict production readiness, optional consent history, account export/deletion, admin validation records, Founder Recovery Plan enforcement, and sanitized evidence ZIP generation.
+The Phase 6–8 API adds streamed JSON/PDF size enforcement, route deadlines, Firestore fixed-window limits, strict production readiness, optional consent history, account export/deletion, admin validation records, Founder Recovery Plan enforcement, and sanitized schema-v2 evidence ZIP generation. The Phase 8 archive retains its existing files and adds a May–August monthly P&L, aggregated customer breakdown, versioned submission metrics, and an evidence README.
 
 All list endpoints accept at most 100 records per page. Evidence export pages internally and fails with `export_limit_exceeded` above `EXPORT_RECORD_LIMIT`; it never silently truncates. Rate-limit subjects are SHA-256 digests and `_rate_limits.expires_at` must have Firestore TTL enabled.
 
@@ -12,6 +12,10 @@ uv run python scripts/import_validation_prospects.py --project <id> --admin-uid 
 ```
 
 Add `--apply` only after reviewing counts. Neither utility sends messages or changes invoice outcomes.
+
+Validate the repository-controlled Phase 8 package with `npm run verify:phase8:structure`.
+Final verification requires a fresh admin evidence ZIP and must be run from a clean commit;
+the verifier never tags, deploys, publishes, or submits.
 
 FastAPI service for Firebase authentication, tenant-derived authorization, transient Gemini PDF extraction, constrained collection decisions, controlled Gmail execution, scheduled rechecks, payments, metrics, and server-owned Firestore access.
 

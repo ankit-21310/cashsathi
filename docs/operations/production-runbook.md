@@ -1,6 +1,6 @@
 # Production runbook
 
-This runbook covers the Phase 6–7 repository release. Cloud deployment and genuine customer validation remain operator responsibilities.
+This runbook covers the Phase 6–8 repository release. Cloud deployment, genuine customer validation, public assets, and external submission remain operator responsibilities.
 
 ## Release order
 
@@ -11,6 +11,7 @@ This runbook covers the Phase 6–7 repository release. Cloud deployment and gen
 5. Deploy with strict readiness enabled and exact HTTPS web/API/OAuth origins, Gmail/KMS secrets, scheduler identity/audience, and at least one administrator UID.
 6. Provision the judge account with a password supplied only through the operator environment. Run the clean-browser production smoke script.
 7. Run `infra/gcp/emit-alert-test-events.ps1 -ProjectId <id> -ConfirmNotifications` and confirm four notifications. Verify the two-hour heartbeat-absence policy in a separately scheduled window. Synthetic events contain no customer payloads.
+8. Generate a fresh admin evidence ZIP, replace every Phase 8 package placeholder, commit the intended release, and run `npm run verify:phase8 -- --evidence-zip <path>`. Preserve the untracked checksum manifest with the controlled release evidence.
 
 ## Alert response
 
@@ -32,7 +33,7 @@ Only global anonymous counters may remain when `ANONYMIZED_METRICS` was active. 
 
 ## Evidence handling
 
-Generate evidence only through the admin export. Verify `manifest.json` reports `complete: true`, inspect collection counts, and store the ZIP in an access-controlled location. It contains pseudonyms and only currently consented testimonial/identity material. On withdrawal, stop all future use immediately and remove the material from controlled submissions, decks, folders, and publication artifacts. Never merge DEMO, RELATED, PREEXISTING, and ARMS_LENGTH results.
+Generate evidence only through the admin export. Verify `manifest.json` reports schema version 2 and `complete: true`, inspect collection counts, reconcile `pnl_by_month.csv`, review `customer_breakdown.csv`, and store the ZIP in an access-controlled location. It contains pseudonyms and only currently consented testimonial/identity material. On withdrawal, stop all future use immediately and remove the material from controlled submissions, decks, folders, and publication artifacts. Never merge DEMO, RELATED, PREEXISTING, UNCLASSIFIED, and ARMS_LENGTH results, and never convert post-action timing into a causation claim.
 
 ## Rollback
 

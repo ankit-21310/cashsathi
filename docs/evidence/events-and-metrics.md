@@ -68,4 +68,6 @@ Demo, related-party, and arms-length records must be separately labelled. “Rec
 
 ## Evidence exports
 
-The admin ZIP includes a completeness manifest, scoreboard, pseudonymous businesses, agent runs, actions, owner-confirmed payments, founder-plan records, a sanitized financial ledger, and only currently consented testimonials/identity fields. It pages internally and aborts above the configured safety ceiling instead of truncating. Customer names, invoice content, email addresses, provider secrets, tenant IDs, and raw receipt references are excluded.
+The schema-v2 admin ZIP includes a completeness manifest, scoreboard, pseudonymous businesses, agent runs, actions, owner-confirmed payments, founder-plan records, a sanitized financial ledger, and only currently consented testimonials/identity fields. It also includes a May–August 2026 monthly P&L, an aggregated customer/validation breakdown, versioned submission metrics, and an evidence README. It pages internally and aborts above the configured safety ceiling instead of truncating. Customer names, prospect names, interview text, invoice content, email addresses, provider secrets, tenant IDs, and raw receipt references are excluded.
+
+The P&L reports integer minor units per currency and applies valid reversals. Revenue remains split into arms-length, related-party, pre-existing, and unclassified categories; expenses and marketing spend remain explicit. The submission metrics use the stated report period, while `scoreboard.json` remains the operational all-time view for backward compatibility.

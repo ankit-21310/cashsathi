@@ -40,6 +40,9 @@ firebase-debug.log
 firestore-debug.log
 ui-debug.log
 
+# Generated release verification output
+/release-artifacts/
+
 # Local planning source documents (not distributed)
 /implimetaion_phase_wise.md
 /CashSathi_AI_XPRIZE_Winning_Blueprint.pdf
