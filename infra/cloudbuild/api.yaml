@@ -1,0 +1,13 @@
+substitutions:
+  _REGION: asia-south1
+  _REPOSITORY: cashsathi
+  _IMAGE_TAG: manual
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --file=services/api/Dockerfile
+      - --tag=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/cashsathi-api:${_IMAGE_TAG}
+      - .
+images:
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/cashsathi-api:${_IMAGE_TAG}

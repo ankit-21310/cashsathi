@@ -1,0 +1,45 @@
+# Dependencies and virtual environments
+node_modules/
+.venv/
+__pycache__/
+*.py[cod]
+
+# Framework and test output
+.next/
+out/
+coverage/
+htmlcov/
+.coverage
+test-results/
+playwright-report/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.firebase/
+.firebase-data/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+!.env.test
+*.local
+*service-account*.json
+application_default_credentials.json
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+
+# Local planning source documents (not distributed)
+/implimetaion_phase_wise.md
+/CashSathi_AI_XPRIZE_Winning_Blueprint.pdf

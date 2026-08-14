@@ -1,0 +1,15 @@
+.git
+**/node_modules
+**/.next
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+.firebase-data
+.env*
+!.env.example
+*.pdf
+docs
+test-results
+playwright-report

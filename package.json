@@ -1,0 +1,36 @@
+{
+  "name": "cashsathi",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "dev": "concurrently -n api,web -c blue,green \"npm run dev:api\" \"npm run dev:web\"",
+    "dev:web": "npm run dev --workspace=web",
+    "dev:api": "uv run --directory services/api uvicorn cashsathi_api.main:app --reload --port 8000",
+    "build": "npm run build:web",
+    "build:web": "npm run build --workspace=web",
+    "lint": "npm run lint:web && npm run lint:api",
+    "lint:web": "npm run lint --workspace=web",
+    "lint:api": "uv run --directory services/api ruff check . && uv run --directory services/api ruff format --check .",
+    "typecheck": "npm run typecheck:web && npm run typecheck:api",
+    "typecheck:web": "npm run typecheck --workspace=web",
+    "typecheck:api": "uv run --directory services/api mypy src",
+    "test": "npm run test:web && npm run test:api",
+    "test:rules": "firebase emulators:exec --only firestore --project cashsathi-local \"npx vitest run infra/firebase/firestore.rules.test.ts\"",
+    "test:web": "npm run test --workspace=web",
+    "test:api": "uv run --directory services/api pytest",
+    "test:e2e": "npm run test:e2e --workspace=web",
+    "emulators": "firebase emulators:start --project cashsathi-local --import .firebase-data --export-on-exit .firebase-data",
+    "seed": "uv run --directory services/api python scripts/seed_emulator.py"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "5.0.0",
+    "concurrently": "9.2.4",
+    "firebase-tools": "15.27.0"
+  }
+}

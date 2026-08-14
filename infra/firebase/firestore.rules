@@ -1,0 +1,11 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // All operational access is server-side through the FastAPI service. Firebase
+    // Admin uses IAM and intentionally bypasses these client rules.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
