@@ -76,10 +76,12 @@ a { color: inherit; text-decoration: none; }
 .divider span { padding: 0 12px; }
 form { display: grid; gap: 18px; }
 label { display: grid; gap: 8px; font-size: .87rem; font-weight: 680; }
-input { width: 100%; border: 1px solid #ccd4ce; background: white; min-height: 48px; padding: 0 14px; border-radius: 11px; outline: none; }
-input:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(19,79,60,.1); }
+input, select, textarea { width: 100%; border: 1px solid #ccd4ce; background: white; min-height: 48px; padding: 0 14px; border-radius: 11px; outline: none; }
+textarea { padding: 12px 14px; min-height: 96px; resize: vertical; }
+input:focus, select:focus, textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(19,79,60,.1); }
 .alert { padding: 13px 15px; border-radius: 10px; margin: 16px 0; font-size: .87rem; }
 .alert-error { background: #f8e8e4; color: var(--red); border: 1px solid #ebc9c1; }
+.alert-success { background: #e3f2e8; color: var(--green); border: 1px solid #bddfc9; }
 
 .app-shell { min-height: 100vh; background: #f4f5f0; }
 .app-header { height: 76px; padding: 0 clamp(20px, 5vw, 64px); background: var(--paper); border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; }
@@ -200,6 +202,14 @@ input:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(19,79,60,.1
 .status-dot.connected { background: #37a367; box-shadow: 0 0 0 5px #def1e5; }
 .currency-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
 .admin-grid { display: grid; grid-template-columns: 1.2fr .8fr; gap: 18px; margin-bottom: 20px; }
+.consent-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin: 20px 0; }
+.consent-grid .foundation-panel { display: grid; align-content: start; gap: 12px; }
+.pricing-panel { display: grid; grid-template-columns: 1.25fr .75fr; gap: 42px; padding: 38px; margin: 30px 0 72px; background: #f2f4ef; border: 1px solid var(--line); border-radius: 24px; }
+.pricing-panel h2 { font-size: 2.4rem; margin: 8px 0; }
+.pricing-panel p { color: var(--muted); line-height: 1.6; }
+.danger-card { margin-top: 22px; border-color: #ebc9c1; }
+.button-danger { background: var(--red); color: white; }
+.validation-row { grid-template-columns: minmax(220px, 1fr) minmax(170px, .5fr) minmax(190px, .6fr); }
 .ledger-form { display: grid; }
 .ledger-form label { margin-top: 12px; }
 .ledger-form .button { margin-top: 18px; }
@@ -217,13 +227,13 @@ input:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(19,79,60,.1
 .timeline time { color: #7c8680; font-size: .78rem; }
 
 @media (max-width: 900px) {
-  .metric-grid-six, .action-grid, .currency-grid, .admin-grid { grid-template-columns: 1fr 1fr; }
+  .metric-grid-six, .action-grid, .currency-grid, .admin-grid, .consent-grid { grid-template-columns: 1fr 1fr; }
   .app-header { height: auto; min-height: 76px; padding-top: 14px; padding-bottom: 14px; gap: 16px; }
   .app-navigation { flex-wrap: wrap; gap: 12px 18px; }
 }
 
 @media (max-width: 640px) {
-  .metric-grid-six, .action-grid, .currency-grid, .admin-grid { grid-template-columns: 1fr; }
+  .metric-grid-six, .action-grid, .currency-grid, .admin-grid, .consent-grid, .pricing-panel { grid-template-columns: 1fr; }
   .activity-row { grid-template-columns: 1fr; }
   .data-banner { flex-direction: column; }
   .app-header { align-items: flex-start; }

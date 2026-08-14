@@ -33,3 +33,24 @@ def test_production_requires_https_cors() -> None:
             gcp_project_id="cashsathi-production",
             cors_allowed_origins="http://example.test",
         )
+
+
+def test_strict_production_validates_integrations_scheduler_and_admin() -> None:
+    with pytest.raises(ValidationError, match="scheduler audience must use HTTPS"):
+        Settings(
+            app_env="production",
+            strict_production_readiness=True,
+            gcp_project_id="cashsathi-production",
+            cors_allowed_origins="https://web.example.test",
+            web_base_url="https://web.example.test",
+            firebase_auth_emulator_host=None,
+            firestore_emulator_host=None,
+            gemini_api_key="configured",
+            gmail_oauth_client_id="configured",
+            gmail_oauth_client_secret="configured",
+            gmail_oauth_redirect_uri="https://api.example.test/api/integrations/gmail/callback",
+            gmail_kms_key_name="projects/test/locations/test/keyRings/test/cryptoKeys/test",
+            scheduler_service_account_email="scheduler@example.test",
+            scheduler_audience="http://api.example.test",
+            platform_admin_uids="admin-uid",
+        )

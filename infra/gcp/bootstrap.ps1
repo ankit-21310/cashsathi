@@ -11,7 +11,7 @@ if (-not (Get-Command gcloud -ErrorAction SilentlyContinue)) {
 }
 
 gcloud config set project $ProjectId
-gcloud services enable run.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com firestore.googleapis.com firebase.googleapis.com secretmanager.googleapis.com cloudkms.googleapis.com cloudscheduler.googleapis.com gmail.googleapis.com billingbudgets.googleapis.com generativelanguage.googleapis.com
+gcloud services enable run.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com firestore.googleapis.com firebase.googleapis.com secretmanager.googleapis.com cloudkms.googleapis.com cloudscheduler.googleapis.com gmail.googleapis.com billingbudgets.googleapis.com generativelanguage.googleapis.com logging.googleapis.com monitoring.googleapis.com
 
 $repository = gcloud artifacts repositories describe cashsathi --location $Region --format "value(name)" 2>$null
 if (-not $repository) {
@@ -65,5 +65,6 @@ if (-not $existingBudget) {
 npx firebase projects:addfirebase $ProjectId
 npx firebase use $ProjectId
 npx firebase deploy --only firestore:rules,firestore:indexes
+gcloud firestore fields ttls update expires_at --collection-group "_rate_limits" --database "(default)" --enable-ttl --async
 
-Write-Output "Bootstrap complete. Enable Google and Email/Password providers in Firebase Authentication before deployment."
+Write-Output "Bootstrap complete. Configure observability before smoke testing, then enable Google and Email/Password providers in Firebase Authentication."

@@ -5,6 +5,7 @@ from datetime import UTC, datetime, time, timedelta
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+import structlog
 from fastapi.concurrency import run_in_threadpool
 
 from cashsathi_api.config import Settings
@@ -84,6 +85,9 @@ class CollectionWorkflow:
         try:
             output = await run_in_threadpool(self._decision.decide, invoice, state, actions)
         except DecisionSchemaFailure as failure:
+            structlog.get_logger("gemini").warning(
+                "decision_schema_failure", category="schema_or_model_failure"
+            )
             proposal = ModelDecision(
                 decision=AgentDecision.REQUEST_HUMAN_REVIEW,
                 rationale="Gemini returned invalid structured output twice.",
@@ -117,6 +121,9 @@ class CollectionWorkflow:
             self._pause_invoice(tenant, invoice)
             return EvaluationResult(agent_run=run, action=None)
         except DecisionTransportFailure as failure:
+            structlog.get_logger("gemini").error(
+                "decision_transport_failure", category="schema_or_model_failure"
+            )
             run = AgentRun(
                 id=run_id,
                 invoice_id=invoice.id,
@@ -327,6 +334,9 @@ class CollectionWorkflow:
                 }
             )
         except GmailDefiniteFailure as failure:
+            structlog.get_logger("gmail").error(
+                "gmail_delivery_failed", category="gmail_failure", failure_code=failure.code
+            )
             completed = datetime.now(UTC)
             final = executing.model_copy(
                 update={
@@ -338,6 +348,7 @@ class CollectionWorkflow:
                 }
             )
         except (GmailAmbiguousFailure, GmailUnavailableError):
+            structlog.get_logger("gmail").error("gmail_delivery_unknown", category="gmail_failure")
             completed = datetime.now(UTC)
             final = executing.model_copy(
                 update={

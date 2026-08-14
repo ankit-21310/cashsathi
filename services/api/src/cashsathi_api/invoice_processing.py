@@ -6,6 +6,7 @@ from io import BytesIO
 from pathlib import PurePath
 from typing import Protocol, cast
 
+import structlog
 from google import genai
 from google.genai import types
 from pydantic import ValidationError
@@ -160,36 +161,53 @@ class GeminiInvoiceExtractor:
             "Set absent values to null and add concise warnings for uncertainty or inconsistency."
         )
         started = time.perf_counter()
-        try:
-            response = self._client.models.generate_content(
-                model=self.model_id,
-                contents=[
-                    types.Part.from_bytes(data=pdf.data, mime_type="application/pdf"),
-                    prompt,
-                ],
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=ExtractedInvoiceDraft,
-                    temperature=0,
-                ),
+        schema_error: Exception | None = None
+        transport_error: Exception | None = None
+        response = None
+        draft = None
+        for _attempt in (1, 2):
+            try:
+                response = self._client.models.generate_content(
+                    model=self.model_id,
+                    contents=[
+                        types.Part.from_bytes(data=pdf.data, mime_type="application/pdf"),
+                        prompt,
+                    ],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=ExtractedInvoiceDraft,
+                        temperature=0,
+                    ),
+                )
+                parsed = response.parsed
+                if isinstance(parsed, ExtractedInvoiceDraft):
+                    draft = parsed
+                elif response.text:
+                    draft = ExtractedInvoiceDraft.model_validate_json(response.text)
+                else:
+                    raise ValueError("empty structured response")
+                break
+            except (ValidationError, ValueError, TypeError) as exc:
+                schema_error = exc
+            except Exception as exc:
+                transport_error = exc
+        if draft is None or response is None:
+            structlog.get_logger("gemini").warning(
+                "invoice_extraction_attempts_exhausted",
+                category="schema_or_model_failure",
+                attempts=2,
+                failure_kind="schema" if schema_error is not None else "transport",
             )
-            parsed = response.parsed
-            if isinstance(parsed, ExtractedInvoiceDraft):
-                draft = parsed
-            elif response.text:
-                draft = ExtractedInvoiceDraft.model_validate_json(response.text)
-            else:
-                raise ValueError("empty structured response")
-        except (ValidationError, ValueError, TypeError) as exc:
-            raise ApiError(
-                502,
-                "invalid_extraction_response",
-                "Gemini returned an invalid extraction. Try again or enter the invoice manually.",
-            ) from exc
-        except ApiError:
-            raise
-        except Exception as exc:
-            raise ExtractionUnavailableError("Gemini extraction failed") from exc
+            if schema_error is not None:
+                raise ApiError(
+                    502,
+                    "invalid_extraction_response",
+                    (
+                        "Gemini returned an invalid extraction. Try again or enter the "
+                        "invoice manually."
+                    ),
+                ) from schema_error
+            raise ExtractionUnavailableError("Gemini extraction failed") from transport_error
         usage = response.usage_metadata
         return ExtractionOutput(
             draft=normalize_extraction(draft),

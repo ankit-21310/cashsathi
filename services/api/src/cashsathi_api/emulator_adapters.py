@@ -95,3 +95,6 @@ class EmulatorGmailAdapter:
             f"{refresh_token}:{recipient}:{subject}:{body}".encode()
         ).hexdigest()
         return f"emulator-message-{digest[:24]}"
+
+    def revoke(self, _refresh_token: str) -> None:
+        return None

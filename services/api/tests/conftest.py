@@ -102,6 +102,19 @@ class TestGmailAdapter:
         self.sent.append((recipient, subject, body))
         return f"gmail-{len(self.sent)}"
 
+    def revoke(self, _refresh_token: str) -> None:
+        return None
+
+
+class TestAccountAuthManager:
+    __test__ = False
+
+    def __init__(self) -> None:
+        self.deleted_users: list[str] = []
+
+    def delete_user(self, uid: str) -> None:
+        self.deleted_users.append(uid)
+
 
 class TestSchedulerVerifier:
     __test__ = False
@@ -134,6 +147,7 @@ def client(repository: InMemoryRepository) -> Iterator[TestClient]:
         gmail_adapter=TestGmailAdapter(),
         token_cipher=TestTokenCipher(),
         scheduler_verifier=TestSchedulerVerifier(),
+        account_auth_manager=TestAccountAuthManager(),
     )
     with TestClient(app, raise_server_exceptions=False) as test_client:
         yield test_client

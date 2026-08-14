@@ -32,6 +32,12 @@ class EvidenceEventType(StrEnum):
     GMAIL_DISCONNECTED = "gmail.disconnected"
     AUTOMATION_CHANGED = "automation.changed"
     EVIDENCE_LEDGER_RECORDED = "evidence.ledger_recorded"
+    OPTIONAL_CONSENT_GRANTED = "privacy.optional_consent_granted"
+    OPTIONAL_CONSENT_WITHDRAWN = "privacy.optional_consent_withdrawn"
+    PLAN_ACTIVATED = "plan.activated"
+    PROSPECT_UPDATED = "validation.prospect_updated"
+    INTERVIEW_RECORDED = "validation.interview_recorded"
+    ACCOUNT_DELETED = "privacy.account_deleted"
 
 
 class InvoiceState(StrEnum):
@@ -115,6 +121,39 @@ class LedgerKind(StrEnum):
     EXPENSE = "EXPENSE"
 
 
+class OptionalConsentType(StrEnum):
+    ANONYMIZED_METRICS = "ANONYMIZED_METRICS"
+    TESTIMONIAL = "TESTIMONIAL"
+    IDENTITY_DISCLOSURE = "IDENTITY_DISCLOSURE"
+
+
+class ConsentEventAction(StrEnum):
+    GRANTED = "GRANTED"
+    WITHDRAWN = "WITHDRAWN"
+
+
+class ProspectStatus(StrEnum):
+    NOT_CONTACTED = "NOT_CONTACTED"
+    CONTACTED = "CONTACTED"
+    INTERVIEW_SCHEDULED = "INTERVIEW_SCHEDULED"
+    INTERVIEWED = "INTERVIEWED"
+    DESIGN_PARTNER = "DESIGN_PARTNER"
+    CONVERTED = "CONVERTED"
+    DECLINED = "DECLINED"
+    DO_NOT_CONTACT = "DO_NOT_CONTACT"
+
+
+class WillingnessToPay(StrEnum):
+    NONE = "NONE"
+    MAYBE = "MAYBE"
+    YES = "YES"
+
+
+class FounderPlanStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    EXHAUSTED = "EXHAUSTED"
+
+
 @dataclass(frozen=True, slots=True)
 class AuthenticatedUser:
     uid: str
@@ -152,6 +191,7 @@ class Business(BaseModel):
     created_at: datetime
     data_classification: DataClassification = DataClassification.UNCLASSIFIED
     relationship: BusinessRelationship = BusinessRelationship.UNCLASSIFIED
+    evidence_pseudonym: str = ""
 
 
 class Membership(BaseModel):
@@ -168,6 +208,7 @@ class MeResponse(BaseModel):
     display_name: str | None
     business: Business | None
     membership: Membership | None
+    is_platform_admin: bool = False
 
 
 class ConsentAccept(BaseModel):
@@ -191,6 +232,51 @@ class ConsentStatus(BaseModel):
     statement: str
     granted: bool
     granted_at: datetime | None = None
+
+
+class OptionalConsentGrant(BaseModel):
+    version: str = Field(min_length=1, max_length=50)
+    accepted: Literal[True]
+    approved_text: str | None = Field(default=None, max_length=1000)
+    channels: list[str] = Field(default_factory=list, max_length=10)
+
+    @field_validator("channels")
+    @classmethod
+    def normalize_channels(cls, value: list[str]) -> list[str]:
+        normalized = [channel.strip().upper() for channel in value if channel.strip()]
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("Consent channels must be unique")
+        return normalized
+
+
+class OptionalConsentWithdraw(BaseModel):
+    confirmed: Literal[True]
+
+
+class OptionalConsentEvent(BaseModel):
+    id: str
+    consent_type: OptionalConsentType
+    action: ConsentEventAction
+    version: str
+    business_id: str
+    user_id: str
+    statement_sha256: str
+    approved_text: str | None = None
+    channels: list[str] = Field(default_factory=list)
+    withdraws_grant_id: str | None = None
+    occurred_at: datetime
+
+
+class OptionalConsentDefinition(BaseModel):
+    consent_type: OptionalConsentType
+    version: str
+    statement: str
+    active_grant: OptionalConsentEvent | None
+    history: list[OptionalConsentEvent]
+
+
+class OptionalConsentResponse(BaseModel):
+    items: list[OptionalConsentDefinition]
 
 
 class ExtractionWarning(BaseModel):
@@ -566,6 +652,143 @@ class MetricsResponse(BaseModel):
     pending_approvals: int
 
 
+class ProspectCreate(BaseModel):
+    company: str = Field(min_length=2, max_length=160)
+    city: str | None = Field(default=None, max_length=100)
+    segment: str = Field(min_length=2, max_length=100)
+    public_website: str | None = Field(default=None, max_length=300)
+    public_contact_channel: str = Field(min_length=2, max_length=160)
+    status: ProspectStatus = ProspectStatus.NOT_CONTACTED
+    notes: str | None = Field(default=None, max_length=1000)
+    next_follow_up_on: date | None = None
+    linked_business_id: str | None = Field(default=None, max_length=100)
+
+
+class ProspectUpdate(BaseModel):
+    status: ProspectStatus | None = None
+    notes: str | None = Field(default=None, max_length=1000)
+    next_follow_up_on: date | None = None
+    linked_business_id: str | None = Field(default=None, max_length=100)
+
+
+class Prospect(BaseModel):
+    id: str
+    company: str
+    city: str | None
+    segment: str
+    public_website: str | None
+    public_contact_channel: str
+    status: ProspectStatus
+    notes: str | None
+    next_follow_up_on: date | None
+    linked_business_id: str | None
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProspectPage(BaseModel):
+    items: list[Prospect]
+    next_cursor: str | None
+
+
+class InterviewCreate(BaseModel):
+    occurred_on: date
+    current_workflow: str = Field(min_length=2, max_length=1000)
+    top_pain: str = Field(min_length=2, max_length=1000)
+    trust_boundary: str = Field(min_length=2, max_length=1000)
+    weekly_receivables_minutes: int | None = Field(default=None, ge=0, le=10080)
+    active_invoice_range: str | None = Field(default=None, max_length=80)
+    automation_comfort: bool | None = None
+    required_approval_cases: list[str] = Field(default_factory=list, max_length=20)
+    willingness_to_pay: WillingnessToPay
+    feedback: str = Field(min_length=2, max_length=2000)
+    follow_up_on: date | None = None
+
+
+class Interview(BaseModel):
+    id: str
+    prospect_id: str
+    occurred_on: date
+    current_workflow: str
+    top_pain: str
+    trust_boundary: str
+    weekly_receivables_minutes: int | None
+    active_invoice_range: str | None
+    automation_comfort: bool | None
+    required_approval_cases: list[str]
+    willingness_to_pay: WillingnessToPay
+    feedback: str
+    follow_up_on: date | None
+    recorded_by: str
+    created_at: datetime
+
+
+class InterviewPage(BaseModel):
+    items: list[Interview]
+    next_cursor: str | None
+
+
+class FounderPlanActivate(BaseModel):
+    business_id: str = Field(min_length=5, max_length=100)
+    paid_on: date
+    receipt_reference: str = Field(min_length=2, max_length=160)
+    idempotency_key: str = Field(min_length=8, max_length=100)
+    confirmed: Literal[True]
+
+
+class FounderPlanEnrollment(BaseModel):
+    id: str
+    business_id: str
+    plan_version: Literal["FOUNDER_RECOVERY_2026_V1"] = "FOUNDER_RECOVERY_2026_V1"
+    status: FounderPlanStatus
+    price_minor: Literal[29900] = 29900
+    currency: Literal["INR"] = "INR"
+    invoice_limit: Literal[10] = 10
+    invoices_used: int = Field(ge=0, le=10)
+    ledger_entry_id: str
+    receipt_reference: str
+    idempotency_key: str
+    activated_by: str
+    activated_at: datetime
+
+
+class FounderPlanPage(BaseModel):
+    items: list[FounderPlanEnrollment]
+    next_cursor: str | None
+
+
+class AccountExport(BaseModel):
+    schema_version: Literal[1] = 1
+    generated_at: datetime
+    business: Business
+    settings: PolicyDefaults
+    product_processing_consent: ConsentRecord | None
+    optional_consents: list[OptionalConsentEvent]
+    invoices: list[Invoice]
+    agent_runs: list[AgentRun]
+    actions: list[Action]
+    payments: list[Payment]
+    founder_plan: FounderPlanEnrollment | None
+    gmail_connected: bool
+
+
+class AccountDelete(BaseModel):
+    business_name: str = Field(min_length=2, max_length=100)
+    confirmed: Literal[True]
+
+
+class AccountDeleteResult(BaseModel):
+    deleted: Literal[True] = True
+    gmail_revocation_succeeded: bool
+    google_revocation_instructions_required: bool
+
+
+class BusinessPage(BaseModel):
+    items: list[Business]
+    next_cursor: str | None
+
+
 class BusinessClassificationUpdate(BaseModel):
     data_classification: DataClassification
     relationship: BusinessRelationship
@@ -603,16 +826,31 @@ class EvidenceLedgerEntry(BaseModel):
     created_at: datetime
 
 
+class EvidenceLedgerPage(BaseModel):
+    items: list[EvidenceLedgerEntry]
+    next_cursor: str | None
+
+
 class AdminImpactResponse(BaseModel):
     paying_businesses: int
     related_paying_businesses: int
+    preexisting_paying_businesses: int
     real_businesses: int
     demo_businesses: int
     unclassified_businesses: int
     revenue_by_currency: dict[str, int]
     related_revenue_by_currency: dict[str, int]
+    preexisting_revenue_by_currency: dict[str, int]
     expenses_by_currency: dict[str, int]
     marketing_spend_by_currency: dict[str, int]
+    cac_by_currency: dict[str, int]
+    prospects: int = 0
+    interviews: int = 0
+    design_partners: int = 0
+    converted_prospects: int = 0
+    active_founder_plans: int = 0
+    exhausted_founder_plans: int = 0
+    consented_testimonials: int = 0
     operational: MetricsResponse
 
 

@@ -39,6 +39,12 @@ Required event types:
 - `gmail.disconnected`
 - `automation.changed`
 - `evidence.ledger_recorded`
+- `consent.optional_granted`
+- `consent.optional_withdrawn`
+- `validation.prospect_recorded`
+- `validation.interview_recorded`
+- `founder_plan.activated`
+- `account.deleted`
 
 Properties contain sanitized operational facts, never bearer tokens, OAuth tokens, raw PDFs, full model prompts, or email bodies. Events are immutable through public APIs.
 
@@ -62,4 +68,4 @@ Demo, related-party, and arms-length records must be separately labelled. “Rec
 
 ## Evidence exports
 
-Exports must include UTC timestamps, event IDs, business pseudonyms, model ID, prompt/policy version, decision, policy result, tool status, and outcome references. Customer names, invoice content, email addresses, and testimonials require the relevant consent before disclosure.
+The admin ZIP includes a completeness manifest, scoreboard, pseudonymous businesses, agent runs, actions, owner-confirmed payments, founder-plan records, a sanitized financial ledger, and only currently consented testimonials/identity fields. It pages internally and aborts above the configured safety ceiling instead of truncating. Customer names, invoice content, email addresses, provider secrets, tenant IDs, and raw receipt references are excluded.

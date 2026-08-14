@@ -25,7 +25,9 @@ Before deployment, add secret versions for `gemini-api-key`, `gmail-oauth-client
 4. Pass the Firebase UIDs allowed to view company-wide evidence with `-PlatformAdminUids`; leave it empty when no administrator should exist.
 5. Confirm the `cashsathi-hourly-recheck` Scheduler job uses the dedicated scheduler identity, the API service URL as its OIDC audience, and an hourly Asia/Kolkata schedule.
 
-Existing databases should run `uv run python scripts/backfill_phase_4.py --project <id>` first as a dry run, then repeat with `--apply`. The backfill never sends email and defaults existing businesses to `UNCLASSIFIED`.
+Existing databases should run `uv run python scripts/backfill_phase_4.py --project <id>` and `uv run python scripts/backfill_phase_6_7.py --project <id>` first as dry runs, then repeat each with `--apply`. The backfills never send email or alter invoice outcomes. Phase 6–7 assigns stable random evidence pseudonyms and additive defaults.
+
+Import the curated public-business prospect file with `uv run python scripts/import_validation_prospects.py --project <id> --admin-uid <uid>` from `services/api`; inspect the dry-run counts and add `--apply` only when correct. The import is idempotent and never sends messages or imports enriched personal contacts.
 
 ## Firebase console steps
 
@@ -42,6 +44,15 @@ Both services use min instances `0` and max instances `3`. The PDF-processing AP
 
 ## Production smoke test
 
+Before generating smoke logs, run `infra/gcp/configure-observability.ps1 -ProjectId <id> -NotificationEmail <operator>` so log metrics can count them. Provision a synthetic judge account with `JUDGE_PASSWORD` set only in the shell:
+
+```text
+uv run --directory services/api python scripts/provision_judge_account.py --project <id> --email <judge-email>
+infra/gcp/smoke-production.ps1 -WebBaseUrl https://<web-service-url>
+```
+
+The provisioner classifies the tenant as `DEMO`, uses a synthetic invoice, and keeps automation disabled. It never prints or commits the password and does not provision Gmail credentials.
+
 1. `GET <api-url>/healthz` returns `ok` and an `X-Request-ID`.
 2. `GET <api-url>/readyz` returns `ready`.
 3. Unauthenticated `GET /api/me` returns the safe `authentication_required` envelope.
@@ -57,3 +68,5 @@ Both services use min instances `0` and max instances `3`. The PDF-processing AP
 13. Confirm Firestore and Cloud Logging contain no raw PDF, OAuth token, full prompt, email body, or raw Gmail/Gemini response.
 
 Deployment is not complete until these checks and Firebase authorized-domain configuration pass.
+
+See `docs/operations/production-runbook.md` for alerts, rollback, deletion, ambiguous Gmail delivery, evidence handling, and cost incidents.

@@ -14,6 +14,15 @@ class AuthVerifier(Protocol):
     def verify(self, token: str) -> AuthenticatedUser: ...
 
 
+class AccountAuthManager(Protocol):
+    def delete_user(self, uid: str) -> None: ...
+
+
+class FirebaseAccountAuthManager:
+    def delete_user(self, uid: str) -> None:
+        auth.delete_user(uid)
+
+
 def initialize_firebase(settings: Settings) -> None:
     if settings.firebase_auth_emulator_host:
         os.environ.setdefault("FIREBASE_AUTH_EMULATOR_HOST", settings.firebase_auth_emulator_host)

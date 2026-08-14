@@ -11,13 +11,19 @@ from typing import Annotated
 from uuid import uuid4
 
 import structlog
-from fastapi import Depends, FastAPI, File, Header, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Header, Query, Request, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
-from cashsathi_api.auth import AuthVerifier, FirebaseAuthVerifier, authenticated_user
+from cashsathi_api.auth import (
+    AccountAuthManager,
+    AuthVerifier,
+    FirebaseAccountAuthManager,
+    FirebaseAuthVerifier,
+    authenticated_user,
+)
 from cashsathi_api.config import Settings, get_settings
 from cashsathi_api.decisioning import (
     DecisionAdapter,
@@ -25,6 +31,8 @@ from cashsathi_api.decisioning import (
     GeminiDecisionAdapter,
 )
 from cashsathi_api.domain import (
+    AccountDelete,
+    AccountDeleteResult,
     Action,
     ActionCancel,
     ActionPage,
@@ -37,19 +45,29 @@ from cashsathi_api.domain import (
     Business,
     BusinessClassificationUpdate,
     BusinessCreate,
+    BusinessPage,
     ConsentAccept,
+    ConsentEventAction,
     ConsentStatus,
     CustomerSnapshot,
     ErrorEnvelope,
     EvaluationResult,
     EvidenceLedgerCreate,
     EvidenceLedgerEntry,
+    EvidenceLedgerPage,
     ExtractionResult,
+    FounderPlanActivate,
+    FounderPlanEnrollment,
+    FounderPlanPage,
+    FounderPlanStatus,
     GmailConnection,
     GmailConnectResponse,
     GmailOAuthState,
     GmailStatus,
     HealthResponse,
+    Interview,
+    InterviewCreate,
+    InterviewPage,
     Invoice,
     InvoiceConfirm,
     InvoiceDetail,
@@ -59,9 +77,19 @@ from cashsathi_api.domain import (
     InvoiceWorkflowStatus,
     MeResponse,
     MetricsResponse,
+    OptionalConsentEvent,
+    OptionalConsentGrant,
+    OptionalConsentResponse,
+    OptionalConsentType,
+    OptionalConsentWithdraw,
     Payment,
     PaymentCreate,
     PolicyDefaults,
+    Prospect,
+    ProspectCreate,
+    ProspectPage,
+    ProspectStatus,
+    ProspectUpdate,
     RecheckResult,
     TenantContext,
 )
@@ -94,7 +122,16 @@ from cashsathi_api.invoice_processing import (
 )
 from cashsathi_api.money import decimal_to_minor
 from cashsathi_api.observability import RequestContextMiddleware, configure_logging
+from cashsathi_api.phase67 import (
+    OPTIONAL_CONSENTS,
+    active_optional_consents,
+    build_account_export,
+    build_evidence_zip,
+    optional_consent_response,
+    statement_hash,
+)
 from cashsathi_api.repository import FirestoreRepository, Repository
+from cashsathi_api.request_guards import RequestGuardsMiddleware
 from cashsathi_api.scheduler_auth import GoogleSchedulerVerifier, SchedulerVerifier
 from cashsathi_api.state_engine import calculate_invoice_state
 from cashsathi_api.workflow import CollectionWorkflow, initial_next_check
@@ -135,6 +172,51 @@ def require_admin(user: AuthenticatedUser, settings: Settings) -> None:
         raise ApiError(403, "admin_required", "Platform administrator access is required.")
 
 
+PROSPECT_TRANSITIONS: dict[ProspectStatus, set[ProspectStatus]] = {
+    ProspectStatus.NOT_CONTACTED: {
+        ProspectStatus.CONTACTED,
+        ProspectStatus.INTERVIEWED,
+        ProspectStatus.DECLINED,
+        ProspectStatus.DO_NOT_CONTACT,
+    },
+    ProspectStatus.CONTACTED: {
+        ProspectStatus.INTERVIEW_SCHEDULED,
+        ProspectStatus.INTERVIEWED,
+        ProspectStatus.DECLINED,
+        ProspectStatus.DO_NOT_CONTACT,
+    },
+    ProspectStatus.INTERVIEW_SCHEDULED: {
+        ProspectStatus.INTERVIEWED,
+        ProspectStatus.DECLINED,
+        ProspectStatus.DO_NOT_CONTACT,
+    },
+    ProspectStatus.INTERVIEWED: {
+        ProspectStatus.INTERVIEW_SCHEDULED,
+        ProspectStatus.DESIGN_PARTNER,
+        ProspectStatus.CONVERTED,
+        ProspectStatus.DECLINED,
+        ProspectStatus.DO_NOT_CONTACT,
+    },
+    ProspectStatus.DESIGN_PARTNER: {
+        ProspectStatus.CONVERTED,
+        ProspectStatus.DECLINED,
+        ProspectStatus.DO_NOT_CONTACT,
+    },
+    ProspectStatus.CONVERTED: set(),
+    ProspectStatus.DECLINED: set(),
+    ProspectStatus.DO_NOT_CONTACT: set(),
+}
+
+
+def validate_prospect_transition(current: ProspectStatus, target: ProspectStatus) -> None:
+    if target != current and target not in PROSPECT_TRANSITIONS[current]:
+        raise ApiError(
+            409,
+            "invalid_prospect_transition",
+            f"A prospect cannot move from {current.value} to {target.value}.",
+        )
+
+
 def _invoice_id(extraction_id: str) -> str:
     return f"inv_{hashlib.sha256(extraction_id.encode()).hexdigest()[:24]}"
 
@@ -167,6 +249,35 @@ def _invoice_summary(repo: Repository, tenant: TenantContext, invoice: Invoice) 
     )
 
 
+def enforce_rate_limit(
+    repo: Repository,
+    subject: str,
+    operation: str,
+    limit: int,
+    window_seconds: int,
+) -> None:
+    repo.consume_rate_limit(
+        subject=subject,
+        operation=operation,
+        limit=limit,
+        window_seconds=window_seconds,
+        now=datetime.now(UTC),
+    )
+
+
+async def read_upload_bounded(file: UploadFile, maximum_bytes: int) -> bytes:
+    chunks: list[bytes] = []
+    streamed_bytes = 0
+    while True:
+        chunk = await file.read(min(64 * 1024, maximum_bytes + 1 - streamed_bytes))
+        if not chunk:
+            return b"".join(chunks)
+        streamed_bytes += len(chunk)
+        if streamed_bytes > maximum_bytes:
+            raise ApiError(413, "pdf_too_large", "The PDF exceeds the size limit.")
+        chunks.append(chunk)
+
+
 def create_app(
     *,
     settings: Settings | None = None,
@@ -177,6 +288,7 @@ def create_app(
     gmail_adapter: GmailAdapter | None = None,
     token_cipher: TokenCipher | None = None,
     scheduler_verifier: SchedulerVerifier | None = None,
+    account_auth_manager: AccountAuthManager | None = None,
 ) -> FastAPI:
     runtime_settings = settings or get_settings()
     configure_logging(runtime_settings)
@@ -185,6 +297,9 @@ def create_app(
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         application.state.repository = repository or FirestoreRepository(runtime_settings)
         application.state.auth_verifier = auth_verifier or FirebaseAuthVerifier(runtime_settings)
+        application.state.account_auth_manager = (
+            account_auth_manager or FirebaseAccountAuthManager()
+        )
         if invoice_extractor is not None:
             application.state.invoice_extractor = invoice_extractor
         elif runtime_settings.local_emulators_enabled:
@@ -238,10 +353,11 @@ def create_app(
         CORSMiddleware,
         allow_origins=runtime_settings.cors_origins,
         allow_credentials=False,
-        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
-        expose_headers=["X-Request-ID"],
+        expose_headers=["X-Request-ID", "Content-Disposition", "Retry-After"],
     )
+    application.add_middleware(RequestGuardsMiddleware, settings=runtime_settings)
     application.add_middleware(RequestContextMiddleware)
     application.add_exception_handler(ApiError, api_error_handler)  # type: ignore[arg-type]
     application.add_exception_handler(RequestValidationError, validation_error_handler)  # type: ignore[arg-type]
@@ -276,6 +392,7 @@ def create_app(
             display_name=user.display_name,
             business=business,
             membership=membership,
+            is_platform_admin=user.uid in runtime_settings.admin_uids,
         )
 
     @application.post("/api/businesses", response_model=Business, tags=["businesses"])
@@ -333,6 +450,185 @@ def create_app(
             granted_at=record.granted_at,
         )
 
+    @application.get(
+        "/api/privacy/consents", response_model=OptionalConsentResponse, tags=["privacy"]
+    )
+    def optional_consents(
+        user: UserDependency, repo: RepositoryDependency
+    ) -> OptionalConsentResponse:
+        return optional_consent_response(repo.list_optional_consents(repo.require_tenant(user)))
+
+    @application.post(
+        "/api/privacy/consents/{consent_type}/grant",
+        response_model=OptionalConsentResponse,
+        tags=["privacy"],
+    )
+    def grant_optional_consent(
+        consent_type: OptionalConsentType,
+        payload: OptionalConsentGrant,
+        user: UserDependency,
+        repo: RepositoryDependency,
+    ) -> OptionalConsentResponse:
+        tenant = repo.require_tenant(user)
+        version, _statement = OPTIONAL_CONSENTS[consent_type]
+        if payload.version != version:
+            raise ApiError(
+                409,
+                "consent_version_changed",
+                "The consent statement changed. Review the current version before accepting.",
+            )
+        if consent_type == OptionalConsentType.ANONYMIZED_METRICS:
+            if payload.approved_text or payload.channels:
+                raise ApiError(
+                    422,
+                    "invalid_consent_scope",
+                    "Anonymized metrics consent does not accept text or channels.",
+                )
+        elif not payload.approved_text or not payload.approved_text.strip() or not payload.channels:
+            raise ApiError(
+                422,
+                "consent_scope_required",
+                "Approved text and at least one publication channel are required.",
+            )
+        events = repo.list_optional_consents(tenant)
+        if consent_type in active_optional_consents(events):
+            raise ApiError(409, "consent_already_active", "This consent is already active.")
+        repo.append_optional_consent(
+            tenant,
+            OptionalConsentEvent(
+                id=f"consent_evt_{uuid4().hex}",
+                consent_type=consent_type,
+                action=ConsentEventAction.GRANTED,
+                version=version,
+                business_id=tenant.business_id,
+                user_id=tenant.user_id,
+                statement_sha256=statement_hash(consent_type),
+                approved_text=payload.approved_text.strip() if payload.approved_text else None,
+                channels=payload.channels,
+                occurred_at=datetime.now(UTC),
+            ),
+        )
+        return optional_consent_response(repo.list_optional_consents(tenant))
+
+    @application.post(
+        "/api/privacy/consents/{grant_id}/withdraw",
+        response_model=OptionalConsentResponse,
+        tags=["privacy"],
+    )
+    def withdraw_optional_consent(
+        grant_id: str,
+        _payload: OptionalConsentWithdraw,
+        user: UserDependency,
+        repo: RepositoryDependency,
+    ) -> OptionalConsentResponse:
+        tenant = repo.require_tenant(user)
+        events = repo.list_optional_consents(tenant)
+        grant = next(
+            (
+                event
+                for event in events
+                if event.id == grant_id and event.action == ConsentEventAction.GRANTED
+            ),
+            None,
+        )
+        if grant is None:
+            raise ApiError(404, "consent_grant_not_found", "The consent grant was not found.")
+        if grant.id not in {active.id for active in active_optional_consents(events).values()}:
+            raise ApiError(409, "consent_not_active", "The consent grant is not active.")
+        repo.append_optional_consent(
+            tenant,
+            OptionalConsentEvent(
+                id=f"consent_evt_{uuid4().hex}",
+                consent_type=grant.consent_type,
+                action=ConsentEventAction.WITHDRAWN,
+                version=grant.version,
+                business_id=tenant.business_id,
+                user_id=tenant.user_id,
+                statement_sha256=grant.statement_sha256,
+                withdraws_grant_id=grant.id,
+                occurred_at=datetime.now(UTC),
+            ),
+        )
+        return optional_consent_response(repo.list_optional_consents(tenant))
+
+    @application.get("/api/account/export", tags=["privacy"])
+    def account_export(user: UserDependency, repo: RepositoryDependency) -> Response:
+        tenant = repo.require_tenant(user)
+        enforce_rate_limit(repo, tenant.business_id, "account_export", 3, 3600)
+        export = build_account_export(repo, tenant, PRODUCT_CONSENT_VERSION)
+        return Response(
+            content=export.model_dump_json(indent=2),
+            media_type="application/json",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="cashsathi-account-{tenant.business_id}.json"'
+                )
+            },
+        )
+
+    @application.post("/api/account/delete", response_model=AccountDeleteResult, tags=["privacy"])
+    async def delete_account(
+        payload: AccountDelete,
+        request: Request,
+        user: UserDependency,
+        repo: RepositoryDependency,
+    ) -> AccountDeleteResult:
+        tenant = repo.require_tenant(user)
+        enforce_rate_limit(repo, tenant.user_id, "account_delete", 3, 86400)
+        business = repo.get_business_by_id(tenant.business_id)
+        if payload.business_name.strip().casefold() != business.name.strip().casefold():
+            raise ApiError(
+                422, "business_name_mismatch", "Enter the exact business name to confirm deletion."
+            )
+        events = repo.list_optional_consents(tenant)
+        retain_metrics = OptionalConsentType.ANONYMIZED_METRICS in active_optional_consents(events)
+        repo.update_automation(tenant, False)
+        revocation_succeeded = True
+        connection = repo.get_gmail_connection(tenant.business_id)
+        if connection and connection.encrypted_refresh_token:
+            adapter: GmailAdapter | None = request.app.state.gmail_adapter
+            cipher: TokenCipher | None = request.app.state.token_cipher
+            try:
+                if adapter is None or cipher is None:
+                    raise GmailUnavailableError("Gmail revocation is not configured")
+                refresh_token = await run_in_threadpool(
+                    cipher.decrypt, connection.encrypted_refresh_token
+                )
+                await run_in_threadpool(adapter.revoke, refresh_token)
+            except GmailUnavailableError:
+                revocation_succeeded = False
+                structlog.get_logger("privacy").error(
+                    "gmail_revocation_failed", category="privacy_deletion_failure"
+                )
+        try:
+            repo.delete_account(tenant, retain_metrics)
+            manager: AccountAuthManager = request.app.state.account_auth_manager
+            await run_in_threadpool(manager.delete_user, user.uid)
+        except Exception:
+            structlog.get_logger("privacy").exception(
+                "account_deletion_failed", category="privacy_deletion_failure"
+            )
+            raise ApiError(
+                503,
+                "account_deletion_incomplete",
+                "Account deletion could not be completed. Contact support with the request ID.",
+            ) from None
+        return AccountDeleteResult(
+            gmail_revocation_succeeded=revocation_succeeded,
+            google_revocation_instructions_required=not revocation_succeeded,
+        )
+
+    @application.get(
+        "/api/plans/current",
+        response_model=FounderPlanEnrollment | None,
+        tags=["plans"],
+    )
+    def current_plan(
+        user: UserDependency, repo: RepositoryDependency
+    ) -> FounderPlanEnrollment | None:
+        tenant = repo.require_tenant(user)
+        return repo.get_founder_plan(tenant.business_id)
+
     @application.post("/api/invoices/extract", response_model=ExtractionResult, tags=["invoices"])
     async def extract_invoice(
         request: Request,
@@ -341,6 +637,7 @@ def create_app(
         file: Annotated[UploadFile, File()],
     ) -> ExtractionResult:
         tenant = repo.require_tenant(user)
+        enforce_rate_limit(repo, tenant.business_id, "invoice_extract", 5, 600)
         if repo.get_consent(tenant, PRODUCT_CONSENT_VERSION) is None:
             raise ApiError(
                 403,
@@ -348,7 +645,7 @@ def create_app(
                 "Accept the current product-processing consent before uploading an invoice.",
             )
         try:
-            data = await file.read(runtime_settings.max_pdf_bytes + 1)
+            data = await read_upload_bounded(file, runtime_settings.max_pdf_bytes)
         finally:
             await file.close()
         pdf = validate_pdf(
@@ -363,6 +660,9 @@ def create_app(
         try:
             output = await run_in_threadpool(extractor.extract, pdf)
         except ExtractionUnavailableError:
+            structlog.get_logger("gemini").warning(
+                "invoice_extraction_failed", category="schema_or_model_failure"
+            )
             raise ApiError(
                 503, "extraction_unavailable", "Invoice extraction is temporarily unavailable."
             ) from None
@@ -474,6 +774,7 @@ def create_app(
         repo: RepositoryDependency,
     ) -> EvaluationResult:
         tenant = repo.require_tenant(user)
+        enforce_rate_limit(repo, tenant.business_id, "invoice_evaluate", 20, 600)
         return await workflow_from(request).evaluate(tenant, invoice_id)
 
     @application.get("/api/agent-runs", response_model=AgentRunPage, tags=["agent"])
@@ -504,7 +805,9 @@ def create_app(
     async def approve_action(
         action_id: str, request: Request, user: UserDependency, repo: RepositoryDependency
     ) -> Action:
-        return await workflow_from(request).approve(repo.require_tenant(user), action_id)
+        tenant = repo.require_tenant(user)
+        enforce_rate_limit(repo, tenant.business_id, "action_mutation", 20, 600)
+        return await workflow_from(request).approve(tenant, action_id)
 
     @application.post("/api/actions/{action_id}/cancel", response_model=Action, tags=["actions"])
     def cancel_action(
@@ -514,13 +817,17 @@ def create_app(
         user: UserDependency,
         repo: RepositoryDependency,
     ) -> Action:
-        return workflow_from(request).cancel(repo.require_tenant(user), action_id, payload)
+        tenant = repo.require_tenant(user)
+        enforce_rate_limit(repo, tenant.business_id, "action_mutation", 20, 600)
+        return workflow_from(request).cancel(tenant, action_id, payload)
 
     @application.post("/api/actions/{action_id}/retry", response_model=Action, tags=["actions"])
     async def retry_action(
         action_id: str, request: Request, user: UserDependency, repo: RepositoryDependency
     ) -> Action:
-        return await workflow_from(request).retry(repo.require_tenant(user), action_id)
+        tenant = repo.require_tenant(user)
+        enforce_rate_limit(repo, tenant.business_id, "action_mutation", 20, 600)
+        return await workflow_from(request).retry(tenant, action_id)
 
     @application.post("/api/actions/{action_id}/resolve", response_model=Action, tags=["actions"])
     def resolve_action(
@@ -530,7 +837,9 @@ def create_app(
         user: UserDependency,
         repo: RepositoryDependency,
     ) -> Action:
-        return workflow_from(request).resolve(repo.require_tenant(user), action_id, payload)
+        tenant = repo.require_tenant(user)
+        enforce_rate_limit(repo, tenant.business_id, "action_mutation", 20, 600)
+        return workflow_from(request).resolve(tenant, action_id, payload)
 
     @application.post(
         "/api/invoices/{invoice_id}/payments", response_model=Payment, tags=["payments"]
@@ -615,6 +924,7 @@ def create_app(
         request: Request, user: UserDependency, repo: RepositoryDependency
     ) -> GmailConnectResponse:
         tenant = repo.require_tenant(user)
+        enforce_rate_limit(repo, tenant.user_id, "gmail_connect", 5, 3600)
         adapter: GmailAdapter | None = request.app.state.gmail_adapter
         if adapter is None or request.app.state.token_cipher is None:
             raise ApiError(503, "gmail_not_configured", "Gmail integration is not configured.")
@@ -704,12 +1014,21 @@ def create_app(
                     return True
                 except Exception:
                     structlog.get_logger("scheduler").exception(
-                        "scheduled_evaluation_failed", invoice_id=invoice.id
+                        "scheduled_evaluation_failed",
+                        invoice_id=invoice.id,
+                        category="scheduler_failure",
                     )
                     return False
 
         results = await asyncio.gather(*(run_one(tenant, invoice) for tenant, invoice in claimed))
         succeeded = sum(1 for result in results if result)
+        structlog.get_logger("scheduler").info(
+            "scheduler_run_completed",
+            category="scheduler_success",
+            claimed=len(claimed),
+            succeeded=succeeded,
+            failed=len(results) - succeeded,
+        )
         return RecheckResult(
             claimed=len(claimed),
             evaluated=len(results),
@@ -717,10 +1036,16 @@ def create_app(
             failed=len(results) - succeeded,
         )
 
-    @application.get("/api/admin/businesses", response_model=list[Business], tags=["admin"])
-    def admin_businesses(user: UserDependency, repo: RepositoryDependency) -> list[Business]:
+    @application.get("/api/admin/businesses", response_model=BusinessPage, tags=["admin"])
+    def admin_businesses(
+        user: UserDependency,
+        repo: RepositoryDependency,
+        limit: Annotated[int, Query(ge=1, le=100)] = 25,
+        cursor: Annotated[str | None, Query(max_length=300)] = None,
+    ) -> BusinessPage:
         require_admin(user, runtime_settings)
-        return repo.list_businesses()
+        items, next_cursor = repo.list_businesses_page(limit, cursor)
+        return BusinessPage(items=items, next_cursor=next_cursor)
 
     @application.post(
         "/api/admin/businesses/{business_id}/classification",
@@ -739,13 +1064,17 @@ def create_app(
         )
 
     @application.get(
-        "/api/admin/evidence-ledger", response_model=list[EvidenceLedgerEntry], tags=["admin"]
+        "/api/admin/evidence-ledger", response_model=EvidenceLedgerPage, tags=["admin"]
     )
     def evidence_ledger(
-        user: UserDependency, repo: RepositoryDependency
-    ) -> list[EvidenceLedgerEntry]:
+        user: UserDependency,
+        repo: RepositoryDependency,
+        limit: Annotated[int, Query(ge=1, le=100)] = 25,
+        cursor: Annotated[str | None, Query(max_length=300)] = None,
+    ) -> EvidenceLedgerPage:
         require_admin(user, runtime_settings)
-        return repo.list_ledger_entries()
+        items, next_cursor = repo.list_ledger_entries_page(limit, cursor)
+        return EvidenceLedgerPage(items=items, next_cursor=next_cursor)
 
     @application.post(
         "/api/admin/evidence-ledger", response_model=EvidenceLedgerEntry, tags=["admin"]
@@ -795,6 +1124,171 @@ def create_app(
             created_at=datetime.now(UTC),
         )
         return repo.create_ledger_entry(entry)
+
+    @application.get("/api/admin/validation/prospects", response_model=ProspectPage, tags=["admin"])
+    def list_validation_prospects(
+        user: UserDependency,
+        repo: RepositoryDependency,
+        limit: Annotated[int, Query(ge=1, le=100)] = 25,
+        cursor: Annotated[str | None, Query(max_length=300)] = None,
+    ) -> ProspectPage:
+        require_admin(user, runtime_settings)
+        items, next_cursor = repo.list_prospects(limit, cursor)
+        return ProspectPage(items=items, next_cursor=next_cursor)
+
+    @application.post("/api/admin/validation/prospects", response_model=Prospect, tags=["admin"])
+    def create_validation_prospect(
+        payload: ProspectCreate,
+        user: UserDependency,
+        repo: RepositoryDependency,
+    ) -> Prospect:
+        require_admin(user, runtime_settings)
+        if payload.linked_business_id:
+            repo.get_business_by_id(payload.linked_business_id)
+        now = datetime.now(UTC)
+        prospect = Prospect(
+            id=f"prospect_{uuid4().hex}",
+            **payload.model_dump(),
+            created_by=user.uid,
+            created_at=now,
+            updated_at=now,
+        )
+        return repo.create_prospect(prospect)
+
+    @application.patch(
+        "/api/admin/validation/prospects/{prospect_id}",
+        response_model=Prospect,
+        tags=["admin"],
+    )
+    def update_validation_prospect(
+        prospect_id: str,
+        payload: ProspectUpdate,
+        user: UserDependency,
+        repo: RepositoryDependency,
+    ) -> Prospect:
+        require_admin(user, runtime_settings)
+        changes = payload.model_dump(exclude_unset=True)
+        current = repo.get_prospect(prospect_id)
+        if changes.get("status") is not None:
+            validate_prospect_transition(current.status, ProspectStatus(changes["status"]))
+        if changes.get("linked_business_id"):
+            repo.get_business_by_id(str(changes["linked_business_id"]))
+        if not changes:
+            return current
+        return repo.update_prospect(prospect_id, changes)
+
+    @application.get(
+        "/api/admin/validation/prospects/{prospect_id}/interviews",
+        response_model=InterviewPage,
+        tags=["admin"],
+    )
+    def list_validation_interviews(
+        prospect_id: str,
+        user: UserDependency,
+        repo: RepositoryDependency,
+        limit: Annotated[int, Query(ge=1, le=100)] = 25,
+        cursor: Annotated[str | None, Query(max_length=300)] = None,
+    ) -> InterviewPage:
+        require_admin(user, runtime_settings)
+        items, next_cursor = repo.list_interviews(prospect_id, limit, cursor)
+        return InterviewPage(items=items, next_cursor=next_cursor)
+
+    @application.post(
+        "/api/admin/validation/prospects/{prospect_id}/interviews",
+        response_model=Interview,
+        tags=["admin"],
+    )
+    def create_validation_interview(
+        prospect_id: str,
+        payload: InterviewCreate,
+        user: UserDependency,
+        repo: RepositoryDependency,
+    ) -> Interview:
+        require_admin(user, runtime_settings)
+        prospect = repo.get_prospect(prospect_id)
+        validate_prospect_transition(prospect.status, ProspectStatus.INTERVIEWED)
+        return repo.create_interview(
+            Interview(
+                id=f"interview_{uuid4().hex}",
+                prospect_id=prospect_id,
+                **payload.model_dump(),
+                recorded_by=user.uid,
+                created_at=datetime.now(UTC),
+            )
+        )
+
+    @application.get("/api/admin/founder-plans", response_model=FounderPlanPage, tags=["admin"])
+    def admin_founder_plans(
+        user: UserDependency,
+        repo: RepositoryDependency,
+        limit: Annotated[int, Query(ge=1, le=100)] = 25,
+        cursor: Annotated[str | None, Query(max_length=300)] = None,
+    ) -> FounderPlanPage:
+        require_admin(user, runtime_settings)
+        items, next_cursor = repo.list_founder_plans(limit, cursor)
+        return FounderPlanPage(items=items, next_cursor=next_cursor)
+
+    @application.post(
+        "/api/admin/founder-plans/activate",
+        response_model=FounderPlanEnrollment,
+        tags=["admin"],
+    )
+    def activate_founder_plan(
+        payload: FounderPlanActivate,
+        user: UserDependency,
+        repo: RepositoryDependency,
+    ) -> FounderPlanEnrollment:
+        require_admin(user, runtime_settings)
+        business = repo.get_business_by_id(payload.business_id)
+        if (
+            business.data_classification.value != "REAL"
+            or business.relationship.value == "UNCLASSIFIED"
+        ):
+            raise ApiError(
+                422,
+                "business_classification_required",
+                "Classify the business as real and set its relationship before activation.",
+            )
+        now = datetime.now(UTC)
+        ledger_digest = hashlib.sha256(payload.idempotency_key.encode()).hexdigest()[:24]
+        ledger_id = f"ledger_plan_{ledger_digest}"
+        enrollment = FounderPlanEnrollment(
+            id=f"plan_{business.id}",
+            business_id=business.id,
+            status=FounderPlanStatus.ACTIVE,
+            invoices_used=0,
+            ledger_entry_id=ledger_id,
+            receipt_reference=payload.receipt_reference.strip(),
+            idempotency_key=payload.idempotency_key,
+            activated_by=user.uid,
+            activated_at=now,
+        )
+        ledger = EvidenceLedgerEntry(
+            id=ledger_id,
+            kind="PRODUCT_REVENUE",
+            amount_minor=29_900,
+            currency="INR",
+            occurred_on=payload.paid_on,
+            category="Founder Recovery Plan",
+            reference=payload.receipt_reference.strip(),
+            business_id=business.id,
+            marketing=False,
+            reversal_of=None,
+            created_by=user.uid,
+            created_at=now,
+        )
+        return repo.activate_founder_plan(enrollment, ledger)
+
+    @application.get("/api/admin/evidence-export", tags=["admin"])
+    def admin_evidence_export(user: UserDependency, repo: RepositoryDependency) -> Response:
+        require_admin(user, runtime_settings)
+        enforce_rate_limit(repo, "platform", "evidence_export", 3, 3600)
+        archive = build_evidence_zip(repo, runtime_settings.export_record_limit)
+        return Response(
+            content=archive,
+            media_type="application/zip",
+            headers={"Content-Disposition": 'attachment; filename="cashsathi-evidence.zip"'},
+        )
 
     @application.get("/api/admin/impact", response_model=AdminImpactResponse, tags=["admin"])
     def platform_impact(user: UserDependency, repo: RepositoryDependency) -> AdminImpactResponse:

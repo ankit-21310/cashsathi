@@ -1,5 +1,6 @@
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -46,6 +47,12 @@ class Settings(BaseSettings):
     scheduler_concurrency: int = Field(default=3, ge=1, le=10)
     action_execution_timeout_minutes: int = Field(default=10, ge=1, le=60)
     platform_admin_uids: str = ""
+    strict_production_readiness: bool = False
+    max_json_bytes: int = Field(default=256 * 1024, ge=1024, le=2 * 1024 * 1024)
+    default_request_timeout_seconds: int = Field(default=30, ge=1, le=120)
+    ai_request_timeout_seconds: int = Field(default=60, ge=5, le=120)
+    scheduler_request_timeout_seconds: int = Field(default=540, ge=30, le=600)
+    export_record_limit: int = Field(default=10_000, ge=100, le=100_000)
 
     @property
     def cors_origins(self) -> list[str]:
@@ -76,18 +83,44 @@ class Settings(BaseSettings):
     def reject_production_emulators(self) -> "Settings":
         if self.app_env == "production" and self.gcp_project_id == "cashsathi-local":
             raise ValueError("Production requires an explicit GCP project ID")
-        if self.app_env == "production" and (
-            self.firebase_auth_emulator_host or self.firestore_emulator_host
-        ):
-            raise ValueError("Firebase emulator variables must not be set in production")
         if not self.cors_origins:
             raise ValueError("At least one CORS origin is required")
+        if any(
+            (parsed := urlsplit(origin)).scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+            for origin in self.cors_origins
+        ):
+            raise ValueError("CORS origins must be exact HTTP(S) origins without paths")
         if self.app_env == "production" and any(
             origin.startswith("http://") for origin in self.cors_origins
         ):
             raise ValueError("Production CORS origins must use HTTPS")
+        if self.app_env == "production" and (
+            self.firebase_auth_emulator_host or self.firestore_emulator_host
+        ):
+            raise ValueError("Firebase emulator variables must not be set in production")
         if self.app_env == "production" and not self.web_base_url.startswith("https://"):
             raise ValueError("Production web base URL must use HTTPS")
+        if self.app_env == "production" and self.strict_production_readiness:
+            required = {
+                "Gemini API key": self.gemini_api_key,
+                "Gmail OAuth client ID": self.gmail_oauth_client_id,
+                "Gmail OAuth client secret": self.gmail_oauth_client_secret,
+                "Gmail KMS key": self.gmail_kms_key_name,
+                "scheduler service account": self.scheduler_service_account_email,
+                "scheduler audience": self.scheduler_audience,
+                "platform administrator": self.platform_admin_uids,
+            }
+            missing = [name for name, value in required.items() if not value]
+            if missing:
+                raise ValueError("Strict production readiness requires: " + ", ".join(missing))
+            if not self.gmail_oauth_redirect_uri.startswith("https://"):
+                raise ValueError("Strict production Gmail redirect URI must use HTTPS")
+            if not str(self.scheduler_audience).startswith("https://"):
+                raise ValueError("Strict production scheduler audience must use HTTPS")
         return self
 
 

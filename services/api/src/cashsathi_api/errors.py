@@ -12,12 +12,14 @@ class ApiError(Exception):
         code: str,
         message: str,
         details: dict[str, Any] | list[Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.message = message
         self.details = details
+        self.headers = headers or {}
 
 
 def _request_id(request: Request) -> str:
@@ -27,6 +29,7 @@ def _request_id(request: Request) -> str:
 async def api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status_code,
+        headers=exc.headers,
         content={
             "error": {
                 "code": exc.code,

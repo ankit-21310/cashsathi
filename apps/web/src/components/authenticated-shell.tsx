@@ -36,6 +36,8 @@ export function AuthenticatedShell({ children }: { children: ReactNode }) {
           <Link href="/approvals">Approvals</Link>
           <Link href="/impact">Impact</Link>
           <Link href="/integrations/gmail">Gmail</Link>
+          <Link href="/privacy">Privacy</Link>
+          {account?.is_platform_admin && <Link href="/admin/impact">Admin</Link>}
         </div>
         <div className="user-actions">
           {account?.business && <span className={`data-pill data-${account.business.data_classification.toLowerCase()}`}>{humanize(account.business.data_classification)}</span>}

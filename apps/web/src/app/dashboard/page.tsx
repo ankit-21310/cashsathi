@@ -8,6 +8,7 @@ import { AuthenticatedShell } from "@/components/authenticated-shell";
 import { useAuth } from "@/components/auth-provider";
 import {
   apiFetch,
+  FounderPlan,
   getApiReadiness,
   GmailStatus,
   InvoicePage,
@@ -23,6 +24,7 @@ export default function DashboardPage() {
   const [invoices, setInvoices] = useState<InvoicePage | null>(null);
   const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
   const [gmail, setGmail] = useState<GmailStatus | null>(null);
+  const [plan, setPlan] = useState<FounderPlan | null>(null);
   const [apiReady, setApiReady] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -33,14 +35,16 @@ export default function DashboardPage() {
       apiFetch<InvoicePage>(user, "/api/invoices"),
       apiFetch<MetricsResponse>(user, "/api/metrics"),
       apiFetch<GmailStatus>(user, "/api/integrations/gmail/status"),
+      apiFetch<FounderPlan | null>(user, "/api/plans/current"),
       getApiReadiness(),
     ])
-      .then(([account, invoicePage, metricResult, gmailResult, ready]) => {
+      .then(([account, invoicePage, metricResult, gmailResult, planResult, ready]) => {
         if (!account.business) return router.replace("/onboarding");
         setMe(account);
         setInvoices(invoicePage);
         setMetrics(metricResult);
         setGmail(gmailResult);
+        setPlan(planResult);
         setApiReady(ready);
       })
       .catch((reason: unknown) =>
@@ -66,6 +70,7 @@ export default function DashboardPage() {
         {me?.business && me.business.data_classification !== "REAL" && (
           <div className="data-banner"><strong>{humanize(me.business.data_classification)} data</strong><span>This workspace is excluded from real-customer impact claims.</span></div>
         )}
+        {plan && <div className="data-banner"><strong>Founder Plan · {plan.invoices_used}/{plan.invoice_limit}</strong><span>₹299 one-time · {humanize(plan.status)} · manual payment verified</span></div>}
         <section className="metric-grid metric-grid-six" aria-label="Receivables metrics">
           <article><span>Monitored value</span><strong>{amount(primary?.monitored_minor)}</strong><small>{metrics?.invoice_count ?? 0} invoices</small></article>
           <article><span>Outstanding</span><strong>{amount(primary?.outstanding_minor)}</strong><small>{metrics?.overdue_count ?? 0} overdue</small></article>

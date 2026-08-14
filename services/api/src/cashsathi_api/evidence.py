@@ -11,14 +11,18 @@ from cashsathi_api.domain import (
     BusinessRelationship,
     CurrencyMetrics,
     DataClassification,
+    FounderPlanStatus,
     InvoiceTimeline,
     LedgerKind,
     MembershipRole,
     MetricsResponse,
+    OptionalConsentType,
     Payment,
+    ProspectStatus,
     TenantContext,
     TimelineEntry,
 )
+from cashsathi_api.phase67 import active_optional_consents
 from cashsathi_api.repository import Repository
 from cashsathi_api.state_engine import calculate_invoice_state
 
@@ -185,10 +189,12 @@ def admin_impact(repo: Repository) -> AdminImpactResponse:
     business_map = {business.id: business for business in businesses}
     revenue: dict[str, int] = defaultdict(int)
     related_revenue: dict[str, int] = defaultdict(int)
+    preexisting_revenue: dict[str, int] = defaultdict(int)
     expenses: dict[str, int] = defaultdict(int)
     marketing: dict[str, int] = defaultdict(int)
     arms_net: dict[tuple[str, str], int] = defaultdict(int)
     related_net: dict[tuple[str, str], int] = defaultdict(int)
+    preexisting_net: dict[tuple[str, str], int] = defaultdict(int)
     entries = repo.list_ledger_entries()
     by_id = {entry.id: entry for entry in entries}
     for entry in entries:
@@ -213,13 +219,55 @@ def admin_impact(repo: Repository) -> AdminImpactResponse:
         elif business.relationship == BusinessRelationship.RELATED:
             related_revenue[entry.currency] += amount
             related_net[(business.id, entry.currency)] += amount
+        elif business.relationship == BusinessRelationship.PREEXISTING:
+            preexisting_revenue[entry.currency] += amount
+            preexisting_net[(business.id, entry.currency)] += amount
     paying = {business_id for (business_id, _currency), amount in arms_net.items() if amount > 0}
     related_paying = {
         business_id for (business_id, _currency), amount in related_net.items() if amount > 0
     }
+    preexisting_paying = {
+        business_id for (business_id, _currency), amount in preexisting_net.items() if amount > 0
+    }
+    prospects = []
+    prospect_cursor: str | None = None
+    while True:
+        prospect_page, prospect_cursor = repo.list_prospects(100, prospect_cursor)
+        prospects.extend(prospect_page)
+        if prospect_cursor is None:
+            break
+    plans = []
+    plan_cursor: str | None = None
+    while True:
+        plan_page, plan_cursor = repo.list_founder_plans(100, plan_cursor)
+        plans.extend(plan_page)
+        if plan_cursor is None:
+            break
+    consented_testimonials = 0
+    for business in businesses:
+        tenant = TenantContext("platform-metrics", business.id, MembershipRole.OWNER)
+        if OptionalConsentType.TESTIMONIAL in active_optional_consents(
+            repo.list_optional_consents(tenant)
+        ):
+            consented_testimonials += 1
+    cac = {
+        currency: round(amount / len(paying)) if paying else 0
+        for currency, amount in marketing.items()
+    }
+    interview_count = 0
+    for prospect in prospects:
+        interview_cursor: str | None = None
+        while True:
+            interview_page, interview_cursor = repo.list_interviews(
+                prospect.id, 100, interview_cursor
+            )
+            interview_count += len(interview_page)
+            if interview_cursor is None:
+                break
     return AdminImpactResponse(
         paying_businesses=len(paying),
         related_paying_businesses=len(related_paying),
+        preexisting_paying_businesses=len(preexisting_paying),
         real_businesses=sum(
             1 for business in businesses if business.data_classification == DataClassification.REAL
         ),
@@ -233,7 +281,22 @@ def admin_impact(repo: Repository) -> AdminImpactResponse:
         ),
         revenue_by_currency=dict(revenue),
         related_revenue_by_currency=dict(related_revenue),
+        preexisting_revenue_by_currency=dict(preexisting_revenue),
         expenses_by_currency=dict(expenses),
         marketing_spend_by_currency=dict(marketing),
+        cac_by_currency=cac,
+        prospects=len(prospects),
+        interviews=interview_count,
+        design_partners=sum(
+            1 for prospect in prospects if prospect.status == ProspectStatus.DESIGN_PARTNER
+        ),
+        converted_prospects=sum(
+            1 for prospect in prospects if prospect.status == ProspectStatus.CONVERTED
+        ),
+        active_founder_plans=sum(1 for plan in plans if plan.status == FounderPlanStatus.ACTIVE),
+        exhausted_founder_plans=sum(
+            1 for plan in plans if plan.status == FounderPlanStatus.EXHAUSTED
+        ),
+        consented_testimonials=consented_testimonials,
         operational=calculate_metrics(repo),
     )

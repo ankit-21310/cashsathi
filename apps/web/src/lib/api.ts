@@ -9,6 +9,7 @@ export interface Business {
   created_at: string;
   data_classification: "UNCLASSIFIED" | "DEMO" | "REAL";
   relationship: "UNCLASSIFIED" | "ARMS_LENGTH" | "RELATED" | "PREEXISTING";
+  evidence_pseudonym: string;
 }
 
 export interface Membership {
@@ -25,6 +26,7 @@ export interface MeResponse {
   display_name: string | null;
   business: Business | null;
   membership: Membership | null;
+  is_platform_admin: boolean;
 }
 
 export type InvoiceState =
@@ -271,16 +273,108 @@ export interface EvidenceLedgerEntry {
   created_at: string;
 }
 
+export interface Page<T> {
+  items: T[];
+  next_cursor: string | null;
+}
+
+export type OptionalConsentType =
+  | "ANONYMIZED_METRICS"
+  | "TESTIMONIAL"
+  | "IDENTITY_DISCLOSURE";
+
+export interface OptionalConsentEvent {
+  id: string;
+  consent_type: OptionalConsentType;
+  action: "GRANTED" | "WITHDRAWN";
+  version: string;
+  approved_text: string | null;
+  channels: string[];
+  withdraws_grant_id: string | null;
+  occurred_at: string;
+}
+
+export interface OptionalConsentDefinition {
+  consent_type: OptionalConsentType;
+  version: string;
+  statement: string;
+  active_grant: OptionalConsentEvent | null;
+  history: OptionalConsentEvent[];
+}
+
+export interface OptionalConsentResponse {
+  items: OptionalConsentDefinition[];
+}
+
+export interface FounderPlan {
+  id: string;
+  business_id: string;
+  plan_version: "FOUNDER_RECOVERY_2026_V1";
+  status: "ACTIVE" | "EXHAUSTED";
+  price_minor: 29900;
+  currency: "INR";
+  invoice_limit: 10;
+  invoices_used: number;
+  ledger_entry_id: string;
+  receipt_reference: string;
+  activated_at: string;
+}
+
+export type ProspectStatus =
+  | "NOT_CONTACTED"
+  | "CONTACTED"
+  | "INTERVIEW_SCHEDULED"
+  | "INTERVIEWED"
+  | "DESIGN_PARTNER"
+  | "CONVERTED"
+  | "DECLINED"
+  | "DO_NOT_CONTACT";
+
+export interface Prospect {
+  id: string;
+  company: string;
+  city: string | null;
+  segment: string;
+  public_website: string | null;
+  public_contact_channel: string;
+  status: ProspectStatus;
+  notes: string | null;
+  next_follow_up_on: string | null;
+  linked_business_id: string | null;
+  updated_at: string;
+}
+
+export interface Interview {
+  id: string;
+  prospect_id: string;
+  occurred_on: string;
+  top_pain: string;
+  trust_boundary: string;
+  willingness_to_pay: "NONE" | "MAYBE" | "YES";
+  feedback: string;
+  follow_up_on: string | null;
+}
+
 export interface AdminImpact {
   paying_businesses: number;
   related_paying_businesses: number;
+  preexisting_paying_businesses: number;
   real_businesses: number;
   demo_businesses: number;
   unclassified_businesses: number;
   revenue_by_currency: Record<string, number>;
   related_revenue_by_currency: Record<string, number>;
+  preexisting_revenue_by_currency: Record<string, number>;
   expenses_by_currency: Record<string, number>;
   marketing_spend_by_currency: Record<string, number>;
+  cac_by_currency: Record<string, number>;
+  prospects: number;
+  interviews: number;
+  design_partners: number;
+  converted_prospects: number;
+  active_founder_plans: number;
+  exhausted_founder_plans: number;
+  consented_testimonials: number;
   operational: MetricsResponse;
 }
 
@@ -334,6 +428,28 @@ export async function apiFetch<T>(user: User, path: string, init: RequestInit = 
     );
   }
   return (await response.json()) as T;
+}
+
+export async function apiDownload(user: User, path: string): Promise<{ blob: Blob; filename: string }> {
+  let response = await request(user, path, {});
+  if (response.status === 401) response = await request(user, path, {}, true);
+  if (!response.ok) {
+    let envelope: ErrorEnvelope | null = null;
+    try {
+      envelope = (await response.json()) as ErrorEnvelope;
+    } catch {
+      // A platform/proxy error may not use the API error envelope.
+    }
+    throw new ApiClientError(
+      envelope?.error.message ?? "The export could not be generated.",
+      response.status,
+      envelope?.error.code ?? "request_failed",
+      envelope?.error.request_id ?? response.headers.get("X-Request-ID"),
+    );
+  }
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const filename = disposition.match(/filename="?([^";]+)"?/)?.[1] ?? "cashsathi-export";
+  return { blob: await response.blob(), filename };
 }
 
 export async function getApiReadiness(): Promise<boolean> {

@@ -55,11 +55,19 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
             raise
 
         response.headers["X-Request-ID"] = request_id
-        logger.info(
+        log_method = logger.error if response.status_code >= 500 else logger.info
+        log_method(
             "request_completed",
             method=request.method,
             path=request.url.path,
             status_code=response.status_code,
+            category=(
+                "api_5xx"
+                if response.status_code >= 500
+                else "rate_limit"
+                if response.status_code == 429
+                else "http_request"
+            ),
             duration_ms=round((time.perf_counter() - started) * 1000, 2),
         )
         return response

@@ -2,7 +2,7 @@
 
 CashSathi is the internal codename for a constrained AI accounts-receivable operator for Indian micro and small businesses. Public builds default to **Receivables Operator Preview** until the product name receives formal clearance.
 
-This repository implements Phases 0–5: product/safety foundations, tenant-isolated invoice extraction and decisioning, controlled Gmail execution, hourly rechecks, explicit payment confirmation, auditable timelines, operator dashboards, and a separately authorized competition-evidence view.
+This repository implements Phases 0–7: product/safety foundations, tenant-isolated invoice extraction and decisioning, controlled Gmail execution, hourly rechecks, explicit payment confirmation, production hardening, owner privacy controls, an admin-only validation workspace, sanitized evidence exports, and the ₹299 Founder Recovery Plan for ten confirmed invoices.
 
 ## Repository
 
@@ -38,3 +38,5 @@ npm run build
 ```
 
 Production deployment instructions are in `docs/operations/cloud-setup.md`. Never commit Firebase Admin credentials or `.env` files.
+
+Phase 7's operational exit gate remains evidence-based: code does not claim traction. It stays open until genuine outreach produces 3–5 design partners and at least five independently verifiable arms-length paying businesses with receipts, feedback, outcomes, and separate publication consents.

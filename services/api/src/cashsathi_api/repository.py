@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol, cast
 
@@ -20,19 +21,26 @@ from cashsathi_api.domain import (
     AuthenticatedUser,
     Business,
     BusinessRelationship,
+    ConsentEventAction,
     ConsentRecord,
     DataClassification,
     EvidenceEventType,
     EvidenceLedgerEntry,
+    FounderPlanEnrollment,
+    FounderPlanStatus,
     GmailConnection,
     GmailOAuthState,
+    Interview,
     Invoice,
     InvoiceWorkflowStatus,
     Membership,
     MembershipRole,
     MembershipStatus,
+    OptionalConsentEvent,
     Payment,
     PolicyDefaults,
+    Prospect,
+    ProspectStatus,
     TenantContext,
 )
 from cashsathi_api.errors import ApiError
@@ -54,6 +62,21 @@ class Repository(Protocol):
     def grant_consent(
         self, tenant: TenantContext, version: str, statement_sha256: str
     ) -> ConsentRecord: ...
+
+    def list_optional_consents(self, tenant: TenantContext) -> list[OptionalConsentEvent]: ...
+
+    def append_optional_consent(
+        self, tenant: TenantContext, event: OptionalConsentEvent
+    ) -> OptionalConsentEvent: ...
+
+    def consume_rate_limit(
+        self,
+        subject: str,
+        operation: str,
+        limit: int,
+        window_seconds: int,
+        now: datetime,
+    ) -> None: ...
 
     def record_extraction(self, tenant: TenantContext, properties: dict[str, Any]) -> str: ...
 
@@ -136,6 +159,10 @@ class Repository(Protocol):
 
     def list_businesses(self) -> list[Business]: ...
 
+    def list_businesses_page(
+        self, limit: int, cursor: str | None
+    ) -> tuple[list[Business], str | None]: ...
+
     def get_business_by_id(self, business_id: str) -> Business: ...
 
     def classify_business(
@@ -148,6 +175,38 @@ class Repository(Protocol):
     def create_ledger_entry(self, entry: EvidenceLedgerEntry) -> EvidenceLedgerEntry: ...
 
     def list_ledger_entries(self) -> list[EvidenceLedgerEntry]: ...
+
+    def list_ledger_entries_page(
+        self, limit: int, cursor: str | None
+    ) -> tuple[list[EvidenceLedgerEntry], str | None]: ...
+
+    def create_prospect(self, prospect: Prospect) -> Prospect: ...
+
+    def update_prospect(self, prospect_id: str, changes: dict[str, Any]) -> Prospect: ...
+
+    def list_prospects(
+        self, limit: int, cursor: str | None
+    ) -> tuple[list[Prospect], str | None]: ...
+
+    def get_prospect(self, prospect_id: str) -> Prospect: ...
+
+    def create_interview(self, interview: Interview) -> Interview: ...
+
+    def list_interviews(
+        self, prospect_id: str, limit: int, cursor: str | None
+    ) -> tuple[list[Interview], str | None]: ...
+
+    def activate_founder_plan(
+        self, enrollment: FounderPlanEnrollment, ledger: EvidenceLedgerEntry
+    ) -> FounderPlanEnrollment: ...
+
+    def get_founder_plan(self, business_id: str) -> FounderPlanEnrollment | None: ...
+
+    def list_founder_plans(
+        self, limit: int, cursor: str | None
+    ) -> tuple[list[FounderPlanEnrollment], str | None]: ...
+
+    def delete_account(self, tenant: TenantContext, retain_anonymous_metrics: bool) -> None: ...
 
 
 def _business_id(uid: str) -> str:
@@ -251,6 +310,7 @@ class FirestoreRepository:
         event_ref = self._client.collection("evidence_events").document(
             f"evt_business_created_{business_id}"
         )
+        evidence_pseudonym = f"evid_{secrets.token_urlsafe(12)}"
         transaction = self._client.transaction()
 
         @google_firestore.transactional
@@ -267,6 +327,7 @@ class FirestoreRepository:
                     "created_at": now,
                     "data_classification": DataClassification.UNCLASSIFIED.value,
                     "relationship": BusinessRelationship.UNCLASSIFIED.value,
+                    "evidence_pseudonym": evidence_pseudonym,
                 },
             )
             txn.set(
@@ -352,6 +413,88 @@ class FirestoreRepository:
         batch.commit()
         return record
 
+    def list_optional_consents(self, tenant: TenantContext) -> list[OptionalConsentEvent]:
+        snapshots = (
+            self._business_ref(tenant)
+            .collection("optional_consents")
+            .order_by("occurred_at", direction=google_firestore.Query.DESCENDING)
+            .stream()
+        )
+        return [OptionalConsentEvent.model_validate(snapshot.to_dict()) for snapshot in snapshots]
+
+    def append_optional_consent(
+        self, tenant: TenantContext, event: OptionalConsentEvent
+    ) -> OptionalConsentEvent:
+        if event.business_id != tenant.business_id or event.user_id != tenant.user_id:
+            raise ApiError(403, "consent_tenant_mismatch", "Consent tenant mismatch.")
+        ref = self._business_ref(tenant).collection("optional_consents").document(event.id)
+        evidence_ref = self._client.collection("evidence_events").document(f"evt_{event.id}")
+        batch = self._client.batch()
+        batch.create(ref, event.model_dump(mode="json"))
+        batch.create(
+            evidence_ref,
+            _event(
+                event_type=(
+                    EvidenceEventType.OPTIONAL_CONSENT_GRANTED
+                    if event.action == ConsentEventAction.GRANTED
+                    else EvidenceEventType.OPTIONAL_CONSENT_WITHDRAWN
+                ),
+                tenant=tenant,
+                subject_type="consent",
+                subject_id=event.id,
+                properties={
+                    "consent_type": event.consent_type.value,
+                    "action": event.action.value,
+                    "version": event.version,
+                    "withdraws_grant_id": event.withdraws_grant_id,
+                },
+            ),
+        )
+        batch.commit()
+        return event
+
+    def consume_rate_limit(
+        self,
+        subject: str,
+        operation: str,
+        limit: int,
+        window_seconds: int,
+        now: datetime,
+    ) -> None:
+        window = int(now.timestamp()) // window_seconds
+        digest = hashlib.sha256(f"{subject}:{operation}:{window}".encode()).hexdigest()
+        expires_at = datetime.fromtimestamp((window + 1) * window_seconds, UTC)
+        ref = self._client.collection("_rate_limits").document(digest)
+        transaction = self._client.transaction(max_attempts=5)
+
+        @google_firestore.transactional
+        def consume(txn: Any) -> None:
+            snapshot = ref.get(transaction=txn)
+            data = snapshot.to_dict() or {}
+            count = int(data.get("count", 0))
+            stored_expiry = data.get("expires_at")
+            if isinstance(stored_expiry, datetime) and stored_expiry <= now:
+                count = 0
+            if count >= limit:
+                retry_after = window_seconds - (int(now.timestamp()) % window_seconds)
+                raise ApiError(
+                    429,
+                    "rate_limit_exceeded",
+                    "Too many requests. Try again after the rate-limit window resets.",
+                    {"operation": operation, "retry_after_seconds": retry_after},
+                    {"Retry-After": str(retry_after)},
+                )
+            txn.set(
+                ref,
+                {
+                    "count": count + 1,
+                    "operation": operation,
+                    "expires_at": expires_at,
+                },
+            )
+
+        consume(transaction)
+
     def record_extraction(self, tenant: TenantContext, properties: dict[str, Any]) -> str:
         extraction_id = f"ext_{self._client.collection('_ids').document().id}"
         self._client.collection("evidence_events").document(extraction_id).create(
@@ -374,6 +517,7 @@ class FirestoreRepository:
         event_ref = self._client.collection("evidence_events").document(
             f"evt_invoice_confirmed_{invoice.id}"
         )
+        plan_ref = self._client.collection("founder_plans").document(f"plan_{tenant.business_id}")
         transaction = self._client.transaction()
 
         @google_firestore.transactional
@@ -390,6 +534,27 @@ class FirestoreRepository:
             existing = invoice_ref.get(transaction=txn)
             if existing.exists:
                 return existing.to_dict() or {}
+            plan_snapshot = plan_ref.get(transaction=txn)
+            if plan_snapshot.exists:
+                plan = FounderPlanEnrollment.model_validate(plan_snapshot.to_dict())
+                if plan.invoices_used >= plan.invoice_limit:
+                    raise ApiError(
+                        409,
+                        "plan_invoice_limit_reached",
+                        "The Founder Recovery Plan ten-invoice allowance is exhausted.",
+                    )
+                invoices_used = plan.invoices_used + 1
+                txn.update(
+                    plan_ref,
+                    {
+                        "invoices_used": invoices_used,
+                        "status": (
+                            FounderPlanStatus.EXHAUSTED.value
+                            if invoices_used == plan.invoice_limit
+                            else FounderPlanStatus.ACTIVE.value
+                        ),
+                    },
+                )
             txn.set(
                 customer_ref,
                 {
@@ -923,9 +1088,7 @@ class FirestoreRepository:
         if invoice_id:
             self.get_invoice(tenant, invoice_id)
             query = query.where("invoice_id", "==", invoice_id)
-        return [
-            Payment.model_validate(snapshot.to_dict()) for snapshot in query.limit(500).stream()
-        ]
+        return [Payment.model_validate(snapshot.to_dict()) for snapshot in query.stream()]
 
     def update_automation(self, tenant: TenantContext, enabled: bool) -> PolicyDefaults:
         ref = self._client.collection("settings").document(tenant.business_id)
@@ -1085,37 +1248,51 @@ class FirestoreRepository:
 
     def list_all_invoices(self, tenant: TenantContext | None = None) -> list[Invoice]:
         if tenant:
-            snapshots = self._business_ref(tenant).collection("invoices").limit(5000).stream()
+            snapshots = self._business_ref(tenant).collection("invoices").stream()
         else:
-            snapshots = self._client.collection_group("invoices").limit(5000).stream()
+            snapshots = self._client.collection_group("invoices").stream()
         return [Invoice.model_validate(snapshot.to_dict()) for snapshot in snapshots]
 
     def list_all_agent_runs(self, tenant: TenantContext | None = None) -> list[AgentRun]:
         if tenant:
-            snapshots = self._business_ref(tenant).collection("agent_runs").limit(5000).stream()
+            snapshots = self._business_ref(tenant).collection("agent_runs").stream()
         else:
-            snapshots = self._client.collection_group("agent_runs").limit(5000).stream()
+            snapshots = self._client.collection_group("agent_runs").stream()
         return [AgentRun.model_validate(snapshot.to_dict()) for snapshot in snapshots]
 
     def list_all_action_records(self, tenant: TenantContext | None = None) -> list[Action]:
         if tenant:
             return [
                 Action.model_validate(snapshot.to_dict())
-                for snapshot in self._business_ref(tenant)
-                .collection("actions")
-                .limit(5000)
-                .stream()
+                for snapshot in self._business_ref(tenant).collection("actions").stream()
             ]
         return [
             Action.model_validate(snapshot.to_dict())
-            for snapshot in self._client.collection_group("actions").limit(5000).stream()
+            for snapshot in self._client.collection_group("actions").stream()
         ]
 
     def list_businesses(self) -> list[Business]:
         return [
             self._parse_business(snapshot.id, snapshot.to_dict() or {})
-            for snapshot in self._client.collection("businesses").limit(5000).stream()
+            for snapshot in self._client.collection("businesses").stream()
         ]
+
+    def list_businesses_page(
+        self, limit: int, cursor: str | None
+    ) -> tuple[list[Business], str | None]:
+        collection = self._client.collection("businesses")
+        query = collection.order_by("created_at", direction=google_firestore.Query.DESCENDING)
+        if cursor:
+            snapshot = collection.document(_cursor_decode(cursor)).get()
+            if not snapshot.exists:
+                raise ApiError(422, "invalid_cursor", "The pagination cursor is invalid.")
+            query = query.start_after(snapshot)
+        snapshots = list(query.limit(limit + 1).stream())
+        selected = snapshots[:limit]
+        return (
+            [self._parse_business(snapshot.id, snapshot.to_dict() or {}) for snapshot in selected],
+            _cursor_encode(selected[-1].id) if len(snapshots) > limit and selected else None,
+        )
 
     def get_business_by_id(self, business_id: str) -> Business:
         snapshot = self._client.collection("businesses").document(business_id).get()
@@ -1183,10 +1360,230 @@ class FirestoreRepository:
         snapshots = (
             self._client.collection("evidence_ledger")
             .order_by("created_at", direction=google_firestore.Query.DESCENDING)
-            .limit(5000)
             .stream()
         )
         return [EvidenceLedgerEntry.model_validate(snapshot.to_dict()) for snapshot in snapshots]
+
+    def list_ledger_entries_page(
+        self, limit: int, cursor: str | None
+    ) -> tuple[list[EvidenceLedgerEntry], str | None]:
+        collection = self._client.collection("evidence_ledger")
+        query = collection.order_by("created_at", direction=google_firestore.Query.DESCENDING)
+        if cursor:
+            snapshot = collection.document(_cursor_decode(cursor)).get()
+            if not snapshot.exists:
+                raise ApiError(422, "invalid_cursor", "The pagination cursor is invalid.")
+            query = query.start_after(snapshot)
+        snapshots = list(query.limit(limit + 1).stream())
+        selected = snapshots[:limit]
+        return (
+            [EvidenceLedgerEntry.model_validate(snapshot.to_dict()) for snapshot in selected],
+            _cursor_encode(selected[-1].id) if len(snapshots) > limit and selected else None,
+        )
+
+    def create_prospect(self, prospect: Prospect) -> Prospect:
+        self._client.collection("validation_prospects").document(prospect.id).create(
+            prospect.model_dump(mode="json")
+        )
+        return prospect
+
+    def get_prospect(self, prospect_id: str) -> Prospect:
+        snapshot = self._client.collection("validation_prospects").document(prospect_id).get()
+        if not snapshot.exists:
+            raise ApiError(404, "prospect_not_found", "The prospect could not be found.")
+        return Prospect.model_validate(snapshot.to_dict())
+
+    def update_prospect(self, prospect_id: str, changes: dict[str, Any]) -> Prospect:
+        ref = self._client.collection("validation_prospects").document(prospect_id)
+        if not ref.get().exists:
+            raise ApiError(404, "prospect_not_found", "The prospect could not be found.")
+        changes = {**changes, "updated_at": datetime.now(UTC)}
+        ref.update(changes)
+        return self.get_prospect(prospect_id)
+
+    def list_prospects(self, limit: int, cursor: str | None) -> tuple[list[Prospect], str | None]:
+        collection = self._client.collection("validation_prospects")
+        query = collection.order_by("updated_at", direction=google_firestore.Query.DESCENDING)
+        if cursor:
+            snapshot = collection.document(_cursor_decode(cursor)).get()
+            if not snapshot.exists:
+                raise ApiError(422, "invalid_cursor", "The pagination cursor is invalid.")
+            query = query.start_after(snapshot)
+        snapshots = list(query.limit(limit + 1).stream())
+        selected = snapshots[:limit]
+        return (
+            [Prospect.model_validate(snapshot.to_dict()) for snapshot in selected],
+            _cursor_encode(selected[-1].id) if len(snapshots) > limit and selected else None,
+        )
+
+    def create_interview(self, interview: Interview) -> Interview:
+        self.get_prospect(interview.prospect_id)
+        self._client.collection("validation_interviews").document(interview.id).create(
+            interview.model_dump(mode="json")
+        )
+        self.update_prospect(
+            interview.prospect_id,
+            {
+                "status": ProspectStatus.INTERVIEWED.value,
+                "next_follow_up_on": interview.follow_up_on,
+            },
+        )
+        return interview
+
+    def list_interviews(
+        self, prospect_id: str, limit: int, cursor: str | None
+    ) -> tuple[list[Interview], str | None]:
+        self.get_prospect(prospect_id)
+        collection = self._client.collection("validation_interviews")
+        query = collection.where("prospect_id", "==", prospect_id).order_by(
+            "created_at", direction=google_firestore.Query.DESCENDING
+        )
+        if cursor:
+            snapshot = collection.document(_cursor_decode(cursor)).get()
+            if not snapshot.exists or (snapshot.to_dict() or {}).get("prospect_id") != prospect_id:
+                raise ApiError(422, "invalid_cursor", "The pagination cursor is invalid.")
+            query = query.start_after(snapshot)
+        snapshots = list(query.limit(limit + 1).stream())
+        selected = snapshots[:limit]
+        return (
+            [Interview.model_validate(snapshot.to_dict()) for snapshot in selected],
+            _cursor_encode(selected[-1].id) if len(snapshots) > limit and selected else None,
+        )
+
+    def activate_founder_plan(
+        self, enrollment: FounderPlanEnrollment, ledger: EvidenceLedgerEntry
+    ) -> FounderPlanEnrollment:
+        invoices_query = (
+            self._client.collection("businesses")
+            .document(enrollment.business_id)
+            .collection("invoices")
+            .limit(enrollment.invoice_limit)
+        )
+        plan_ref = self._client.collection("founder_plans").document(enrollment.id)
+        ledger_ref = self._client.collection("evidence_ledger").document(ledger.id)
+        event_ref = self._client.collection("evidence_events").document(
+            f"evt_plan_activated_{enrollment.id}"
+        )
+        transaction = self._client.transaction(max_attempts=5)
+
+        @google_firestore.transactional
+        def activate(txn: Any) -> tuple[dict[str, Any], bool]:
+            existing = plan_ref.get(transaction=txn)
+            if existing.exists:
+                return existing.to_dict() or {}, False
+            invoices = list(invoices_query.get(transaction=txn))
+            activated = enrollment.model_copy(
+                update={
+                    "invoices_used": len(invoices),
+                    "status": (
+                        FounderPlanStatus.EXHAUSTED
+                        if len(invoices) == enrollment.invoice_limit
+                        else FounderPlanStatus.ACTIVE
+                    ),
+                }
+            )
+            txn.create(plan_ref, activated.model_dump(mode="json"))
+            txn.create(ledger_ref, ledger.model_dump(mode="json"))
+            txn.create(
+                event_ref,
+                {
+                    "schema_version": 1,
+                    "event_type": EvidenceEventType.PLAN_ACTIVATED.value,
+                    "business_id": activated.business_id,
+                    "actor_type": "USER",
+                    "actor_id": enrollment.activated_by,
+                    "subject_type": "founder_plan",
+                    "subject_id": activated.id,
+                    "occurred_at": activated.activated_at.isoformat(),
+                    "source": "api",
+                    "properties": {
+                        "plan_version": activated.plan_version,
+                        "price_minor": activated.price_minor,
+                        "currency": activated.currency,
+                        "invoice_limit": activated.invoice_limit,
+                    },
+                },
+            )
+            return activated.model_dump(mode="json"), True
+
+        plan_data, created = activate(transaction)
+        result = FounderPlanEnrollment.model_validate(plan_data)
+        if not created and result.idempotency_key != enrollment.idempotency_key:
+            raise ApiError(409, "founder_plan_exists", "A founder plan already exists.")
+        return result
+
+    def get_founder_plan(self, business_id: str) -> FounderPlanEnrollment | None:
+        snapshot = self._client.collection("founder_plans").document(f"plan_{business_id}").get()
+        return FounderPlanEnrollment.model_validate(snapshot.to_dict()) if snapshot.exists else None
+
+    def list_founder_plans(
+        self, limit: int, cursor: str | None
+    ) -> tuple[list[FounderPlanEnrollment], str | None]:
+        collection = self._client.collection("founder_plans")
+        query = collection.order_by("activated_at", direction=google_firestore.Query.DESCENDING)
+        if cursor:
+            snapshot = collection.document(_cursor_decode(cursor)).get()
+            if not snapshot.exists:
+                raise ApiError(422, "invalid_cursor", "The pagination cursor is invalid.")
+            query = query.start_after(snapshot)
+        snapshots = list(query.limit(limit + 1).stream())
+        selected = snapshots[:limit]
+        return (
+            [FounderPlanEnrollment.model_validate(snapshot.to_dict()) for snapshot in selected],
+            _cursor_encode(selected[-1].id) if len(snapshots) > limit and selected else None,
+        )
+
+    def delete_account(self, tenant: TenantContext, retain_anonymous_metrics: bool) -> None:
+        invoices = self.list_all_invoices(tenant)
+        runs = self.list_all_agent_runs(tenant)
+        actions = self.list_all_action_records(tenant)
+        if retain_anonymous_metrics:
+            aggregate_ref = self._client.collection("platform_aggregates").document(
+                "deleted_accounts"
+            )
+            aggregate_ref.set(
+                {
+                    "businesses": google_firestore.Increment(1),
+                    "invoices": google_firestore.Increment(len(invoices)),
+                    "agent_runs": google_firestore.Increment(len(runs)),
+                    "successful_actions": google_firestore.Increment(
+                        sum(1 for action in actions if action.state == ActionState.SUCCEEDED)
+                    ),
+                    "updated_at": datetime.now(UTC),
+                },
+                merge=True,
+            )
+        for snapshot in (
+            self._client.collection("evidence_ledger")
+            .where("business_id", "==", tenant.business_id)
+            .stream()
+        ):
+            data = snapshot.to_dict() or {}
+            reference = str(data.get("reference", ""))
+            snapshot.reference.update(
+                {
+                    "business_id": None,
+                    "created_by": "deleted_account",
+                    "reference": f"sha256:{hashlib.sha256(reference.encode()).hexdigest()}",
+                }
+            )
+        for collection_name in ("oauth_states", "evidence_events"):
+            for snapshot in (
+                self._client.collection(collection_name)
+                .where("business_id", "==", tenant.business_id)
+                .stream()
+            ):
+                snapshot.reference.delete()
+        for snapshot in (
+            self._client.collection("validation_prospects")
+            .where("linked_business_id", "==", tenant.business_id)
+            .stream()
+        ):
+            snapshot.reference.update({"linked_business_id": None, "updated_at": datetime.now(UTC)})
+        self._client.collection("founder_plans").document(f"plan_{tenant.business_id}").delete()
+        self._client.collection("settings").document(tenant.business_id).delete()
+        self._client.recursive_delete(self._business_ref(tenant))
+        self._client.collection("users").document(tenant.user_id).delete()
 
     def _business_ref(self, tenant: TenantContext) -> Any:
         return self._client.collection("businesses").document(tenant.business_id)
@@ -1200,6 +1597,7 @@ class FirestoreRepository:
             created_at=data["created_at"],
             data_classification=data.get("data_classification", DataClassification.UNCLASSIFIED),
             relationship=data.get("relationship", BusinessRelationship.UNCLASSIFIED),
+            evidence_pseudonym=str(data.get("evidence_pseudonym", "")),
         )
 
     @staticmethod
@@ -1220,6 +1618,8 @@ class InMemoryRepository:
         self.businesses: dict[str, Business] = {}
         self.memberships: dict[str, Membership] = {}
         self.consents: dict[str, ConsentRecord] = {}
+        self.optional_consents: dict[str, OptionalConsentEvent] = {}
+        self.rate_limits: dict[str, tuple[int, datetime]] = {}
         self.extractions: dict[str, dict[str, Any]] = {}
         self.invoices: dict[str, Invoice] = {}
         self.actions: dict[str, Action] = {}
@@ -1229,6 +1629,9 @@ class InMemoryRepository:
         self.oauth_states: dict[str, GmailOAuthState] = {}
         self.gmail_connections: dict[str, GmailConnection] = {}
         self.ledger_entries: dict[str, EvidenceLedgerEntry] = {}
+        self.prospects: dict[str, Prospect] = {}
+        self.interviews: dict[str, Interview] = {}
+        self.founder_plans: dict[str, FounderPlanEnrollment] = {}
         self.evidence_events: dict[str, dict[str, Any]] = {}
         self.policy_settings: dict[str, PolicyDefaults] = {}
         self._id_counter = 0
@@ -1255,7 +1658,11 @@ class InMemoryRepository:
         business_id = _business_id(user.uid)
         now = datetime.now(UTC)
         business = Business(
-            id=business_id, name=name.strip(), owner_user_id=user.uid, created_at=now
+            id=business_id,
+            name=name.strip(),
+            owner_user_id=user.uid,
+            created_at=now,
+            evidence_pseudonym=f"evid_{secrets.token_urlsafe(12)}",
         )
         membership = Membership(
             business_id=business_id,
@@ -1302,6 +1709,67 @@ class InMemoryRepository:
         )
         return record
 
+    def list_optional_consents(self, tenant: TenantContext) -> list[OptionalConsentEvent]:
+        return sorted(
+            (
+                event
+                for event in self.optional_consents.values()
+                if event.business_id == tenant.business_id
+            ),
+            key=lambda event: event.occurred_at,
+            reverse=True,
+        )
+
+    def append_optional_consent(
+        self, tenant: TenantContext, event: OptionalConsentEvent
+    ) -> OptionalConsentEvent:
+        if event.business_id != tenant.business_id or event.user_id != tenant.user_id:
+            raise ApiError(403, "consent_tenant_mismatch", "Consent tenant mismatch.")
+        if event.id in self.optional_consents:
+            raise ApiError(409, "consent_event_exists", "The consent event already exists.")
+        self.optional_consents[event.id] = event
+        self.evidence_events[f"evt_{event.id}"] = _event(
+            event_type=(
+                EvidenceEventType.OPTIONAL_CONSENT_GRANTED
+                if event.action == ConsentEventAction.GRANTED
+                else EvidenceEventType.OPTIONAL_CONSENT_WITHDRAWN
+            ),
+            tenant=tenant,
+            subject_type="consent",
+            subject_id=event.id,
+            properties={
+                "consent_type": event.consent_type.value,
+                "action": event.action.value,
+                "version": event.version,
+            },
+        )
+        return event
+
+    def consume_rate_limit(
+        self,
+        subject: str,
+        operation: str,
+        limit: int,
+        window_seconds: int,
+        now: datetime,
+    ) -> None:
+        window = int(now.timestamp()) // window_seconds
+        digest = hashlib.sha256(f"{subject}:{operation}:{window}".encode()).hexdigest()
+        expires_at = datetime.fromtimestamp((window + 1) * window_seconds, UTC)
+        count, stored_expiry = self.rate_limits.get(digest, (0, expires_at))
+        if stored_expiry <= now:
+            count = 0
+        if count >= limit:
+            retry_after = window_seconds - (int(now.timestamp()) % window_seconds)
+            raise ApiError(
+                429,
+                "rate_limit_exceeded",
+                "Too many requests. Try again after the rate-limit window resets.",
+                {"operation": operation, "retry_after_seconds": retry_after},
+                {"Retry-After": str(retry_after)},
+            )
+        self.rate_limits[digest] = (count + 1, expires_at)
+
     def record_extraction(self, tenant: TenantContext, properties: dict[str, Any]) -> str:
         extraction_id = self._next_id("ext")
         self.extractions[extraction_id] = {
@@ -1327,6 +1795,25 @@ class InMemoryRepository:
                     "This extraction was already confirmed with different values.",
                 )
             return existing
+        plan = self.founder_plans.get(tenant.business_id)
+        if plan:
+            if plan.invoices_used >= plan.invoice_limit:
+                raise ApiError(
+                    409,
+                    "plan_invoice_limit_reached",
+                    "The Founder Recovery Plan ten-invoice allowance is exhausted.",
+                )
+            used = plan.invoices_used + 1
+            self.founder_plans[tenant.business_id] = plan.model_copy(
+                update={
+                    "invoices_used": used,
+                    "status": (
+                        FounderPlanStatus.EXHAUSTED
+                        if used == plan.invoice_limit
+                        else FounderPlanStatus.ACTIVE
+                    ),
+                }
+            )
         self.invoices[invoice.id] = invoice
         self.evidence_events[f"evt_invoice_confirmed_{invoice.id}"] = _event(
             event_type=EvidenceEventType.INVOICE_CONFIRMED,
@@ -1791,6 +2278,14 @@ class InMemoryRepository:
     def list_businesses(self) -> list[Business]:
         return list(self.businesses.values())
 
+    def list_businesses_page(
+        self, limit: int, cursor: str | None
+    ) -> tuple[list[Business], str | None]:
+        businesses = sorted(
+            self.businesses.values(), key=lambda item: (item.created_at, item.id), reverse=True
+        )
+        return self._page(businesses, limit, cursor)
+
     def get_business_by_id(self, business_id: str) -> Business:
         business = self.businesses.get(business_id)
         if business is None:
@@ -1839,3 +2334,185 @@ class InMemoryRepository:
         return sorted(
             self.ledger_entries.values(), key=lambda entry: entry.created_at, reverse=True
         )
+
+    def list_ledger_entries_page(
+        self, limit: int, cursor: str | None
+    ) -> tuple[list[EvidenceLedgerEntry], str | None]:
+        return self._page(self.list_ledger_entries(), limit, cursor)
+
+    def create_prospect(self, prospect: Prospect) -> Prospect:
+        if prospect.id in self.prospects:
+            existing = self.prospects[prospect.id]
+            if (
+                existing.company == prospect.company
+                and existing.public_website == prospect.public_website
+            ):
+                return existing
+            raise ApiError(409, "prospect_exists", "The prospect already exists.")
+        self.prospects[prospect.id] = prospect
+        return prospect
+
+    def get_prospect(self, prospect_id: str) -> Prospect:
+        prospect = self.prospects.get(prospect_id)
+        if not prospect:
+            raise ApiError(404, "prospect_not_found", "The prospect could not be found.")
+        return prospect
+
+    def update_prospect(self, prospect_id: str, changes: dict[str, Any]) -> Prospect:
+        prospect = self.get_prospect(prospect_id)
+        updated = prospect.model_copy(update={**changes, "updated_at": datetime.now(UTC)})
+        self.prospects[prospect_id] = updated
+        return updated
+
+    def list_prospects(self, limit: int, cursor: str | None) -> tuple[list[Prospect], str | None]:
+        prospects = sorted(
+            self.prospects.values(), key=lambda item: (item.updated_at, item.id), reverse=True
+        )
+        return self._page(prospects, limit, cursor)
+
+    def create_interview(self, interview: Interview) -> Interview:
+        self.get_prospect(interview.prospect_id)
+        if interview.id in self.interviews:
+            return self.interviews[interview.id]
+        self.interviews[interview.id] = interview
+        self.update_prospect(
+            interview.prospect_id,
+            {
+                "status": ProspectStatus.INTERVIEWED,
+                "next_follow_up_on": interview.follow_up_on,
+            },
+        )
+        return interview
+
+    def list_interviews(
+        self, prospect_id: str, limit: int, cursor: str | None
+    ) -> tuple[list[Interview], str | None]:
+        self.get_prospect(prospect_id)
+        interviews = sorted(
+            (item for item in self.interviews.values() if item.prospect_id == prospect_id),
+            key=lambda item: (item.created_at, item.id),
+            reverse=True,
+        )
+        return self._page(interviews, limit, cursor)
+
+    def activate_founder_plan(
+        self, enrollment: FounderPlanEnrollment, ledger: EvidenceLedgerEntry
+    ) -> FounderPlanEnrollment:
+        existing = self.founder_plans.get(enrollment.business_id)
+        if existing:
+            if existing.idempotency_key != enrollment.idempotency_key:
+                raise ApiError(409, "founder_plan_exists", "A founder plan already exists.")
+            return existing
+        used = min(
+            enrollment.invoice_limit,
+            sum(
+                1
+                for invoice in self.invoices.values()
+                if invoice.business_id == enrollment.business_id
+            ),
+        )
+        enrollment = enrollment.model_copy(
+            update={
+                "invoices_used": used,
+                "status": (
+                    FounderPlanStatus.EXHAUSTED
+                    if used == enrollment.invoice_limit
+                    else FounderPlanStatus.ACTIVE
+                ),
+            }
+        )
+        self.founder_plans[enrollment.business_id] = enrollment
+        self.ledger_entries[ledger.id] = ledger
+        return enrollment
+
+    def get_founder_plan(self, business_id: str) -> FounderPlanEnrollment | None:
+        return self.founder_plans.get(business_id)
+
+    def list_founder_plans(
+        self, limit: int, cursor: str | None
+    ) -> tuple[list[FounderPlanEnrollment], str | None]:
+        plans = sorted(
+            self.founder_plans.values(),
+            key=lambda item: (item.activated_at, item.id),
+            reverse=True,
+        )
+        return self._page(plans, limit, cursor)
+
+    def delete_account(self, tenant: TenantContext, retain_anonymous_metrics: bool) -> None:
+        invoice_ids = {
+            invoice.id
+            for invoice in self.invoices.values()
+            if invoice.business_id == tenant.business_id
+        }
+        if retain_anonymous_metrics:
+            self.evidence_events["aggregate_deleted_accounts"] = {
+                "businesses": int(
+                    self.evidence_events.get("aggregate_deleted_accounts", {}).get("businesses", 0)
+                )
+                + 1
+            }
+        for entry_id, entry in list(self.ledger_entries.items()):
+            if entry.business_id == tenant.business_id:
+                self.ledger_entries[entry_id] = entry.model_copy(
+                    update={
+                        "business_id": None,
+                        "created_by": "deleted_account",
+                        "reference": (
+                            f"sha256:{hashlib.sha256(entry.reference.encode()).hexdigest()}"
+                        ),
+                    }
+                )
+        for prospect_id, prospect in list(self.prospects.items()):
+            if prospect.linked_business_id == tenant.business_id:
+                self.prospects[prospect_id] = prospect.model_copy(
+                    update={"linked_business_id": None, "updated_at": datetime.now(UTC)}
+                )
+        for action_id, action in list(self.actions.items()):
+            if action.invoice_id in invoice_ids:
+                self.actions.pop(action_id, None)
+        for attempt_id, attempt in list(self.action_attempts.items()):
+            if attempt.action_id not in self.actions:
+                self.action_attempts.pop(attempt_id, None)
+        for extraction_id, extraction in list(self.extractions.items()):
+            if extraction.get("business_id") == tenant.business_id:
+                self.extractions.pop(extraction_id, None)
+        for state_id, state in list(self.oauth_states.items()):
+            if state.business_id == tenant.business_id:
+                self.oauth_states.pop(state_id, None)
+        for mapping in (
+            self.invoices,
+            self.agent_runs,
+            self.payments,
+            self.gmail_connections,
+            self.policy_settings,
+            self.founder_plans,
+            self.businesses,
+        ):
+            for key, value in list(mapping.items()):
+                business_id = getattr(value, "business_id", key)
+                if business_id == tenant.business_id:
+                    mapping.pop(key, None)
+        for consent_id, consent in list(self.consents.items()):
+            if consent.business_id == tenant.business_id:
+                self.consents.pop(consent_id, None)
+        for event_id, event in list(self.optional_consents.items()):
+            if event.business_id == tenant.business_id:
+                self.optional_consents.pop(event_id, None)
+        for evidence_id, evidence in list(self.evidence_events.items()):
+            if evidence.get("business_id") == tenant.business_id:
+                self.evidence_events.pop(evidence_id, None)
+        self.memberships.pop(tenant.user_id, None)
+
+    def _page(
+        self, items: list[Any], limit: int, cursor: str | None
+    ) -> tuple[list[Any], str | None]:
+        start = 0
+        if cursor:
+            cursor_id = _cursor_decode(cursor)
+            try:
+                start = next(index for index, item in enumerate(items) if item.id == cursor_id) + 1
+            except StopIteration:
+                raise ApiError(422, "invalid_cursor", "The pagination cursor is invalid.") from None
+        selected = items[start : start + limit]
+        has_more = start + limit < len(items)
+        return selected, _cursor_encode(selected[-1].id) if has_more and selected else None

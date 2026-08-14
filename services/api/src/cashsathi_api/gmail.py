@@ -3,6 +3,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import secrets
+import urllib.error
+import urllib.parse
+import urllib.request
 from email.message import EmailMessage
 from typing import Protocol, cast
 
@@ -80,6 +83,8 @@ class GmailAdapter(Protocol):
 
     def send(self, refresh_token: str, recipient: str, subject: str, body: str) -> str: ...
 
+    def revoke(self, refresh_token: str) -> None: ...
+
 
 class GoogleGmailAdapter:
     def __init__(self, settings: Settings) -> None:
@@ -88,6 +93,7 @@ class GoogleGmailAdapter:
         self._client_id = settings.gmail_oauth_client_id.get_secret_value()
         self._client_secret = settings.gmail_oauth_client_secret.get_secret_value()
         self._redirect_uri = settings.gmail_oauth_redirect_uri
+        self._timeout_seconds = settings.gmail_timeout_seconds
 
     def _flow(self, code_verifier: str) -> Flow:
         flow = Flow.from_client_config(
@@ -175,3 +181,17 @@ class GoogleGmailAdapter:
         if not isinstance(message_id, str) or not message_id:
             raise GmailAmbiguousFailure("Gmail returned no delivery identifier.")
         return message_id
+
+    def revoke(self, refresh_token: str) -> None:
+        request = urllib.request.Request(
+            "https://oauth2.googleapis.com/revoke",
+            data=urllib.parse.urlencode({"token": refresh_token}).encode("ascii"),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self._timeout_seconds) as response:
+                if response.status >= 400:
+                    raise GmailUnavailableError("Gmail token revocation failed")
+        except (OSError, urllib.error.URLError) as exc:
+            raise GmailUnavailableError("Gmail token revocation failed") from exc

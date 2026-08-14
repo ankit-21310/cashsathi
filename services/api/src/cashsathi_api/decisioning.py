@@ -92,6 +92,7 @@ class GeminiDecisionAdapter:
         )
         started = time.perf_counter()
         last_schema_error: Exception | None = None
+        last_transport_error: Exception | None = None
         for attempt in (1, 2):
             try:
                 response = self._client.models.generate_content(
@@ -121,9 +122,12 @@ class GeminiDecisionAdapter:
                 last_schema_error = exc
                 continue
             except Exception as exc:
-                raise DecisionTransportFailure(
-                    round((time.perf_counter() - started) * 1000)
-                ) from exc
+                last_transport_error = exc
+                continue
+        if last_transport_error is not None and last_schema_error is None:
+            raise DecisionTransportFailure(
+                round((time.perf_counter() - started) * 1000)
+            ) from last_transport_error
         raise DecisionSchemaFailure(2, round((time.perf_counter() - started) * 1000)) from (
-            last_schema_error
+            last_schema_error or last_transport_error
         )

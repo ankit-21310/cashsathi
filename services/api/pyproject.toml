@@ -16,7 +16,7 @@ dependencies = [
   "iso4217==1.16.20260101",
   "pydantic==2.13.4",
   "pydantic-settings==2.15.0",
-  "pypdf==6.14.2",
+  "pypdf==6.15.0",
   "python-multipart==0.0.32",
   "python-dotenv==1.2.2",
   "structlog==26.1.0",

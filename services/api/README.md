@@ -1,5 +1,18 @@
 # CashSathi API
 
+The Phase 6–7 API adds streamed JSON/PDF size enforcement, route deadlines, Firestore fixed-window limits, strict production readiness, optional consent history, account export/deletion, admin validation records, Founder Recovery Plan enforcement, and sanitized evidence ZIP generation.
+
+All list endpoints accept at most 100 records per page. Evidence export pages internally and fails with `export_limit_exceeded` above `EXPORT_RECORD_LIMIT`; it never silently truncates. Rate-limit subjects are SHA-256 digests and `_rate_limits.expires_at` must have Firestore TTL enabled.
+
+Operator utilities default to dry-run:
+
+```text
+uv run python scripts/backfill_phase_6_7.py --project <id>
+uv run python scripts/import_validation_prospects.py --project <id> --admin-uid <uid>
+```
+
+Add `--apply` only after reviewing counts. Neither utility sends messages or changes invoice outcomes.
+
 FastAPI service for Firebase authentication, tenant-derived authorization, transient Gemini PDF extraction, constrained collection decisions, controlled Gmail execution, scheduled rechecks, payments, metrics, and server-owned Firestore access.
 
 ## Phase 2–5 API

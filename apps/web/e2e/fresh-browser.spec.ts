@@ -80,4 +80,28 @@ test.describe("fresh browser owner journey", () => {
     await expect(page.getByText("Verified payment recorded", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "Evaluate again" })).toBeDisabled();
   });
+
+  test("opens the admin validation workspace and downloads sanitized evidence", async ({ page }) => {
+    const unique = Date.now();
+    await page.goto("/login");
+    await page.getByLabel("Email").fill("owner-a@example.test");
+    await page.getByLabel("Password").fill("DemoPass!123");
+    await page.locator("form").getByRole("button", { name: "Sign in", exact: true }).click();
+    await expect(page).toHaveURL(/\/dashboard$/);
+    await page.getByRole("link", { name: "Admin", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Platform impact" })).toBeVisible();
+    await page.getByRole("link", { name: "Validation workspace" }).click();
+    await page.getByLabel("Company").fill(`Public Demo Company ${unique}`);
+    await page.getByLabel("Segment").fill("Agency");
+    await page.getByLabel("Public website").fill("https://example.test");
+    await page.getByLabel("Public contact channel").fill("Public website contact form");
+    await page.getByRole("button", { name: "Add prospect" }).click();
+    await expect(page.getByText(`Public Demo Company ${unique}`, { exact: true })).toBeVisible();
+
+    await page.getByRole("link", { name: "Evidence dashboard" }).click();
+    const downloadPromise = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Download evidence ZIP" }).click();
+    const download = await downloadPromise;
+    expect(download.suggestedFilename()).toBe("cashsathi-evidence.zip");
+  });
 });

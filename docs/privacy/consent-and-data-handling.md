@@ -45,6 +45,14 @@ Required: no. Default: not granted. This must not be bundled with product access
 - Audit/evidence exports: retain only for the disclosed competition or compliance purpose.
 - Failed diagnostics: sanitized and time-limited; no raw document payloads.
 
+## Account controls
+
+Authenticated owners can view the append-only history for all optional consents, grant a current version, withdraw an active grant, export structured tenant data, and delete the account. Testimonial grants store the exact approved quote and channels. Identity grants store the exact approved identity fields and channels. A withdrawal excludes that material from every future evidence export immediately.
+
+Account JSON exports include business configuration, settings, invoices, actions, agent runs, owner-confirmed payments, plan enrollment, and consent history. OAuth state, encrypted tokens, rate-limit records, provider secrets, and internal provider payloads are excluded.
+
+Deletion requires the typed business name and an explicit confirmation. Gmail revocation is attempted before the local purge and Firebase Authentication user deletion occurs last. A revocation failure does not preserve local tenant data. The only allowed retention is a global anonymous aggregate when its consent is active and an unlinked financial ledger amount/date/category whose free-text reference has been replaced by a SHA-256 digest.
+
 ## Phase 2–3 enforcement
 
 - PDF extension, MIME type, signature, structure, encryption, size, and page count are checked before Gemini processing.
