@@ -7,6 +7,8 @@ export interface Business {
   name: string;
   owner_user_id: string;
   created_at: string;
+  data_classification: "UNCLASSIFIED" | "DEMO" | "REAL";
+  relationship: "UNCLASSIFIED" | "ARMS_LENGTH" | "RELATED" | "PREEXISTING";
 }
 
 export interface Membership {
@@ -91,6 +93,10 @@ export interface Invoice {
   review_reason: string | null;
   created_at: string;
   updated_at: string;
+  verified_paid_minor: number;
+  next_check_at: string | null;
+  workflow_status: "OPEN" | "PAUSED" | "CLOSED";
+  active_action_id: string | null;
 }
 
 export interface InvoiceSummary {
@@ -128,6 +134,8 @@ export interface PolicyResult {
 
 export interface AgentRun {
   id: string;
+  invoice_id: string;
+  business_id: string;
   status: "SUCCEEDED" | "FAILED" | "HUMAN_REVIEW";
   invoice_state: InvoiceState;
   model_proposal: ModelDecision | null;
@@ -136,14 +144,36 @@ export interface AgentRun {
   prompt_version: string;
   attempt_count: number;
   latency_ms: number;
+  failure_code: string | null;
   created_at: string;
+  action_id: string | null;
 }
 
 export interface ProposedAction {
   id: string;
+  invoice_id: string;
+  agent_run_id: string;
   action_type: "SEND_REMINDER";
-  state: "PROPOSED" | "AWAITING_APPROVAL";
+  state:
+    | "PROPOSED"
+    | "AWAITING_APPROVAL"
+    | "EXECUTING"
+    | "SUCCEEDED"
+    | "FAILED"
+    | "UNKNOWN"
+    | "CANCELLED";
   created_at: string;
+  recipient_email: string | null;
+  subject: string | null;
+  body: string | null;
+  automatic: boolean;
+  approved_at: string | null;
+  provider_message_id: string | null;
+  failure_code: string | null;
+  failure_message: string | null;
+  delivery_possible: boolean | null;
+  resolution: "CONFIRMED_DELIVERED" | "CONFIRMED_NOT_DELIVERED" | "MANUALLY_SENT" | null;
+  attempt_count: number;
 }
 
 export interface InvoiceDetail {
@@ -156,6 +186,102 @@ export interface InvoiceDetail {
 export interface EvaluationResult {
   agent_run: AgentRun;
   action: ProposedAction | null;
+}
+
+export interface AgentRunPage {
+  items: AgentRun[];
+  next_cursor: string | null;
+}
+
+export interface ActionPage {
+  items: ProposedAction[];
+  next_cursor: string | null;
+}
+
+export interface GmailStatus {
+  connected: boolean;
+  connected_at: string | null;
+  last_error_code: string | null;
+  automation_enabled: boolean;
+}
+
+export interface PolicySettings {
+  reminder_cooldown_hours: number;
+  high_value_threshold_minor: number;
+  high_value_currency: string;
+  automation_enabled: boolean;
+}
+
+export interface CurrencyMetrics {
+  currency: string;
+  monitored_minor: number;
+  outstanding_minor: number;
+  overdue_minor: number;
+  verified_paid_minor: number;
+  post_action_paid_minor: number;
+}
+
+export interface MetricsResponse {
+  currencies: CurrencyMetrics[];
+  invoice_count: number;
+  overdue_count: number;
+  human_review_count: number;
+  ai_decisions: number;
+  successful_actions: number;
+  automatic_successful_actions: number;
+  automation_rate: number;
+  average_days_overdue: number;
+  pending_approvals: number;
+}
+
+export interface TimelineEntry {
+  id: string;
+  entry_type: string;
+  title: string;
+  detail: string;
+  occurred_at: string;
+  status: string | null;
+}
+
+export interface InvoiceTimeline {
+  items: TimelineEntry[];
+}
+
+export interface Payment {
+  id: string;
+  invoice_id: string;
+  amount_minor: number;
+  currency: string;
+  paid_at: string;
+  reference: string;
+  created_at: string;
+}
+
+export interface EvidenceLedgerEntry {
+  id: string;
+  kind: "PRODUCT_REVENUE" | "EXPENSE";
+  amount_minor: number;
+  currency: string;
+  occurred_on: string;
+  category: string;
+  reference: string;
+  business_id: string | null;
+  marketing: boolean;
+  reversal_of: string | null;
+  created_at: string;
+}
+
+export interface AdminImpact {
+  paying_businesses: number;
+  related_paying_businesses: number;
+  real_businesses: number;
+  demo_businesses: number;
+  unclassified_businesses: number;
+  revenue_by_currency: Record<string, number>;
+  related_revenue_by_currency: Record<string, number>;
+  expenses_by_currency: Record<string, number>;
+  marketing_spend_by_currency: Record<string, number>;
+  operational: MetricsResponse;
 }
 
 interface ErrorEnvelope {

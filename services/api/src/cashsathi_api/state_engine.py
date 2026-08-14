@@ -19,7 +19,8 @@ def calculate_invoice_state(
     recent = actions or []
     waiting = any(
         action.state in {ActionState.SUCCEEDED, ActionState.UNKNOWN}
-        and (current - action.created_at).total_seconds() < 72 * 3600
+        and (current - (action.execution_completed_at or action.created_at)).total_seconds()
+        < 72 * 3600
         for action in recent
     )
     if waiting:

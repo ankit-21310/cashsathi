@@ -6,6 +6,8 @@ export GCP_PROJECT_ID=cashsathi-local
 export FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099
 export FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
 export CORS_ALLOWED_ORIGINS=http://127.0.0.1:3000
+export WEB_BASE_URL=http://127.0.0.1:3000
+export GMAIL_OAUTH_REDIRECT_URI=http://127.0.0.1:8000/api/integrations/gmail/callback
 
 services/api/.venv/bin/uvicorn cashsathi_api.main:app --host 127.0.0.1 --port 8000 >/tmp/cashsathi-api.log 2>&1 &
 api_pid=$!

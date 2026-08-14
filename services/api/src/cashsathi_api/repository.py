@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol, cast
 
 from firebase_admin import firestore
@@ -14,15 +14,24 @@ from cashsathi_api.auth import initialize_firebase
 from cashsathi_api.config import Settings
 from cashsathi_api.domain import (
     Action,
+    ActionAttempt,
+    ActionState,
     AgentRun,
     AuthenticatedUser,
     Business,
+    BusinessRelationship,
     ConsentRecord,
+    DataClassification,
     EvidenceEventType,
+    EvidenceLedgerEntry,
+    GmailConnection,
+    GmailOAuthState,
     Invoice,
+    InvoiceWorkflowStatus,
     Membership,
     MembershipRole,
     MembershipStatus,
+    Payment,
     PolicyDefaults,
     TenantContext,
 )
@@ -62,11 +71,83 @@ class Repository(Protocol):
 
     def save_evaluation(
         self, tenant: TenantContext, run: AgentRun, action: Action | None
-    ) -> None: ...
+    ) -> Action | None: ...
 
     def list_agent_runs(
         self, tenant: TenantContext, invoice_id: str | None, limit: int, cursor: str | None
     ) -> tuple[list[AgentRun], str | None]: ...
+
+    def list_all_actions(
+        self, tenant: TenantContext, state: ActionState | None, limit: int, cursor: str | None
+    ) -> tuple[list[Action], str | None]: ...
+
+    def get_action(self, tenant: TenantContext, action_id: str) -> Action: ...
+
+    def update_action(
+        self,
+        tenant: TenantContext,
+        action: Action,
+        attempt: ActionAttempt | None,
+        event_type: EvidenceEventType,
+        actor_type: str,
+    ) -> Action: ...
+
+    def reserve_action_execution(
+        self,
+        tenant: TenantContext,
+        action: Action,
+        expected_state: ActionState,
+        actor_type: str,
+    ) -> Action: ...
+
+    def update_invoice(self, tenant: TenantContext, invoice: Invoice) -> Invoice: ...
+
+    def record_payment(
+        self, tenant: TenantContext, payment: Payment
+    ) -> tuple[Payment, Invoice]: ...
+
+    def list_payments(
+        self, tenant: TenantContext, invoice_id: str | None = None
+    ) -> list[Payment]: ...
+
+    def update_automation(self, tenant: TenantContext, enabled: bool) -> PolicyDefaults: ...
+
+    def create_oauth_state(self, tenant: TenantContext, state: GmailOAuthState) -> None: ...
+
+    def consume_oauth_state(self, state: str) -> GmailOAuthState: ...
+
+    def get_gmail_connection(self, business_id: str) -> GmailConnection | None: ...
+
+    def save_gmail_connection(
+        self, tenant: TenantContext, connection: GmailConnection
+    ) -> GmailConnection: ...
+
+    def disconnect_gmail(self, tenant: TenantContext) -> None: ...
+
+    def claim_due_invoices(
+        self, now: datetime, limit: int, lease_minutes: int
+    ) -> list[tuple[TenantContext, Invoice]]: ...
+
+    def list_all_invoices(self, tenant: TenantContext | None = None) -> list[Invoice]: ...
+
+    def list_all_agent_runs(self, tenant: TenantContext | None = None) -> list[AgentRun]: ...
+
+    def list_all_action_records(self, tenant: TenantContext | None = None) -> list[Action]: ...
+
+    def list_businesses(self) -> list[Business]: ...
+
+    def get_business_by_id(self, business_id: str) -> Business: ...
+
+    def classify_business(
+        self,
+        business_id: str,
+        classification: DataClassification,
+        relationship: BusinessRelationship,
+    ) -> Business: ...
+
+    def create_ledger_entry(self, entry: EvidenceLedgerEntry) -> EvidenceLedgerEntry: ...
+
+    def list_ledger_entries(self) -> list[EvidenceLedgerEntry]: ...
 
 
 def _business_id(uid: str) -> str:
@@ -180,7 +261,13 @@ class FirestoreRepository:
             now = datetime.now(UTC)
             txn.set(
                 business_ref,
-                {"name": name.strip(), "owner_user_id": user.uid, "created_at": now},
+                {
+                    "name": name.strip(),
+                    "owner_user_id": user.uid,
+                    "created_at": now,
+                    "data_classification": DataClassification.UNCLASSIFIED.value,
+                    "relationship": BusinessRelationship.UNCLASSIFIED.value,
+                },
             )
             txn.set(
                 user_ref,
@@ -379,8 +466,127 @@ class FirestoreRepository:
         )
         return [Action.model_validate(snapshot.to_dict()) for snapshot in snapshots]
 
-    def save_evaluation(self, tenant: TenantContext, run: AgentRun, action: Action | None) -> None:
+    def save_evaluation(
+        self, tenant: TenantContext, run: AgentRun, action: Action | None
+    ) -> Action | None:
         business_ref = self._business_ref(tenant)
+        if action is not None:
+            invoice_ref = business_ref.collection("invoices").document(run.invoice_id)
+            transaction = self._client.transaction()
+
+            @google_firestore.transactional
+            def reserve(txn: Any) -> dict[str, Any]:
+                invoice_snapshot = invoice_ref.get(transaction=txn)
+                if not invoice_snapshot.exists:
+                    raise ApiError(404, "invoice_not_found", "The invoice could not be found.")
+                invoice = Invoice.model_validate(invoice_snapshot.to_dict())
+                reserved = action
+                created = True
+                if invoice.active_action_id:
+                    active_ref = business_ref.collection("actions").document(
+                        invoice.active_action_id
+                    )
+                    active_snapshot = active_ref.get(transaction=txn)
+                    if active_snapshot.exists:
+                        active = Action.model_validate(active_snapshot.to_dict())
+                        if active.state in {
+                            ActionState.PROPOSED,
+                            ActionState.AWAITING_APPROVAL,
+                            ActionState.EXECUTING,
+                            ActionState.FAILED,
+                            ActionState.UNKNOWN,
+                        }:
+                            reserved = active
+                            created = False
+                if created:
+                    sequence = invoice.reminder_sequence + 1
+                    raw_key = f"{tenant.business_id}:{invoice.id}:SEND_REMINDER:{sequence}"
+                    action_key = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+                    reserved = action.model_copy(
+                        update={
+                            "id": f"act_{action_key[:28]}",
+                            "action_key": action_key,
+                            "reminder_sequence": sequence,
+                        }
+                    )
+                    txn.create(
+                        business_ref.collection("actions").document(reserved.id),
+                        reserved.model_dump(mode="json"),
+                    )
+                    txn.update(
+                        invoice_ref,
+                        {
+                            "active_action_id": reserved.id,
+                            "reminder_sequence": sequence,
+                            "workflow_status": InvoiceWorkflowStatus.PAUSED.value,
+                            "next_check_at": None,
+                            "evaluation_lease_until": None,
+                        },
+                    )
+                stored_run = run.model_copy(update={"action_id": reserved.id})
+                txn.create(
+                    business_ref.collection("agent_runs").document(run.id),
+                    stored_run.model_dump(mode="json"),
+                )
+                if run.model_proposal is not None:
+                    txn.create(
+                        self._client.collection("evidence_events").document(
+                            f"evt_decision_{run.id}"
+                        ),
+                        _event(
+                            event_type=EvidenceEventType.AGENT_DECISION_CREATED,
+                            tenant=tenant,
+                            subject_type="invoice",
+                            subject_id=run.invoice_id,
+                            actor_type="AGENT",
+                            properties={
+                                "agent_run_id": run.id,
+                                "model_id": run.model_id,
+                                "prompt_version": run.prompt_version,
+                                "status": run.status.value,
+                            },
+                        ),
+                    )
+                if run.policy_result:
+                    txn.create(
+                        self._client.collection("evidence_events").document(f"evt_policy_{run.id}"),
+                        _event(
+                            event_type=EvidenceEventType.POLICY_CHECKED,
+                            tenant=tenant,
+                            subject_type="invoice",
+                            subject_id=run.invoice_id,
+                            actor_type="SYSTEM",
+                            properties={
+                                "agent_run_id": run.id,
+                                "outcome": run.policy_result.outcome.value,
+                                "final_decision": run.policy_result.final_decision.value,
+                                "matched_rules": run.policy_result.matched_rules,
+                                "policy_version": run.policy_result.policy_version,
+                            },
+                        ),
+                    )
+                if created:
+                    txn.create(
+                        self._client.collection("evidence_events").document(
+                            f"evt_action_{reserved.id}"
+                        ),
+                        _event(
+                            event_type=EvidenceEventType.ACTION_PROPOSED,
+                            tenant=tenant,
+                            subject_type="action",
+                            subject_id=reserved.id,
+                            actor_type="AGENT",
+                            properties={
+                                "invoice_id": reserved.invoice_id,
+                                "agent_run_id": reserved.agent_run_id,
+                                "state": reserved.state.value,
+                            },
+                        ),
+                    )
+                return reserved.model_dump(mode="json")
+
+            return Action.model_validate(reserve(transaction))
+
         batch = self._client.batch()
         batch.create(
             business_ref.collection("agent_runs").document(run.id), run.model_dump(mode="json")
@@ -420,27 +626,8 @@ class FirestoreRepository:
                     },
                 ),
             )
-        if action:
-            batch.create(
-                business_ref.collection("actions").document(action.id),
-                action.model_dump(mode="json"),
-            )
-            batch.create(
-                self._client.collection("evidence_events").document(f"evt_action_{action.id}"),
-                _event(
-                    event_type=EvidenceEventType.ACTION_PROPOSED,
-                    tenant=tenant,
-                    subject_type="action",
-                    subject_id=action.id,
-                    actor_type="AGENT",
-                    properties={
-                        "invoice_id": action.invoice_id,
-                        "agent_run_id": action.agent_run_id,
-                        "state": action.state.value,
-                    },
-                ),
-            )
         batch.commit()
+        return None
 
     def list_agent_runs(
         self, tenant: TenantContext, invoice_id: str | None, limit: int, cursor: str | None
@@ -461,6 +648,546 @@ class FirestoreRepository:
         next_cursor = _cursor_encode(selected[-1].id) if has_more and selected else None
         return runs, next_cursor
 
+    def list_all_actions(
+        self, tenant: TenantContext, state: ActionState | None, limit: int, cursor: str | None
+    ) -> tuple[list[Action], str | None]:
+        collection = self._business_ref(tenant).collection("actions")
+        query = collection.order_by("created_at", direction=google_firestore.Query.DESCENDING)
+        if state is not None:
+            query = query.where("state", "==", state.value)
+        if cursor:
+            snapshot = collection.document(_cursor_decode(cursor)).get()
+            if not snapshot.exists:
+                raise ApiError(422, "invalid_cursor", "The pagination cursor is invalid.")
+            query = query.start_after(snapshot)
+        snapshots = list(query.limit(limit + 1).stream())
+        selected = snapshots[:limit]
+        return (
+            [Action.model_validate(snapshot.to_dict()) for snapshot in selected],
+            _cursor_encode(selected[-1].id) if len(snapshots) > limit and selected else None,
+        )
+
+    def get_action(self, tenant: TenantContext, action_id: str) -> Action:
+        snapshot = self._business_ref(tenant).collection("actions").document(action_id).get()
+        if not snapshot.exists:
+            raise ApiError(404, "action_not_found", "The action could not be found.")
+        action = Action.model_validate(snapshot.to_dict())
+        self.get_invoice(tenant, action.invoice_id)
+        return action
+
+    def update_action(
+        self,
+        tenant: TenantContext,
+        action: Action,
+        attempt: ActionAttempt | None,
+        event_type: EvidenceEventType,
+        actor_type: str,
+    ) -> Action:
+        current = self.get_action(tenant, action.id)
+        if current.invoice_id != action.invoice_id:
+            raise ApiError(409, "action_conflict", "The action no longer matches its invoice.")
+        batch = self._client.batch()
+        action_ref = self._business_ref(tenant).collection("actions").document(action.id)
+        batch.set(action_ref, action.model_dump(mode="json"))
+        if attempt is not None:
+            batch.create(
+                action_ref.collection("attempts").document(attempt.id),
+                attempt.model_dump(mode="json"),
+            )
+        event_id = (
+            f"evt_{event_type.value.replace('.', '_')}_{action.id}_"
+            f"{action.state.value.lower()}_{action.attempt_count}"
+        )
+        batch.create(
+            self._client.collection("evidence_events").document(event_id),
+            _event(
+                event_type=event_type,
+                tenant=tenant,
+                subject_type="action",
+                subject_id=action.id,
+                actor_type=actor_type,
+                properties={
+                    "invoice_id": action.invoice_id,
+                    "state": action.state.value,
+                    "automatic": action.automatic,
+                    "failure_code": action.failure_code,
+                    "provider_message_id": action.provider_message_id,
+                },
+            ),
+        )
+        batch.commit()
+        return action
+
+    def reserve_action_execution(
+        self,
+        tenant: TenantContext,
+        action: Action,
+        expected_state: ActionState,
+        actor_type: str,
+    ) -> Action:
+        action_ref = self._business_ref(tenant).collection("actions").document(action.id)
+        transaction = self._client.transaction()
+
+        @google_firestore.transactional
+        def reserve(txn: Any) -> dict[str, Any]:
+            snapshot = action_ref.get(transaction=txn)
+            if not snapshot.exists:
+                raise ApiError(404, "action_not_found", "The action could not be found.")
+            current = Action.model_validate(snapshot.to_dict())
+            if current.state != expected_state:
+                raise ApiError(409, "action_not_executable", "The action state changed.")
+            now = datetime.now(UTC)
+            executing = action.model_copy(
+                update={
+                    "state": ActionState.EXECUTING,
+                    "attempt_count": current.attempt_count + 1,
+                    "execution_started_at": now,
+                    "execution_completed_at": None,
+                    "failure_code": None,
+                    "failure_message": None,
+                    "delivery_possible": None,
+                }
+            )
+            txn.set(action_ref, executing.model_dump(mode="json"))
+            if expected_state in {ActionState.AWAITING_APPROVAL, ActionState.FAILED}:
+                txn.create(
+                    self._client.collection("evidence_events").document(
+                        f"evt_action_approved_{action.id}_{executing.attempt_count}"
+                    ),
+                    _event(
+                        event_type=EvidenceEventType.ACTION_APPROVED,
+                        tenant=tenant,
+                        subject_type="action",
+                        subject_id=action.id,
+                        actor_type=actor_type,
+                        properties={"invoice_id": action.invoice_id},
+                    ),
+                )
+            txn.create(
+                self._client.collection("evidence_events").document(
+                    f"evt_action_executing_{action.id}_{executing.attempt_count}"
+                ),
+                _event(
+                    event_type=EvidenceEventType.ACTION_EXECUTED,
+                    tenant=tenant,
+                    subject_type="action",
+                    subject_id=action.id,
+                    actor_type=actor_type,
+                    properties={
+                        "invoice_id": action.invoice_id,
+                        "state": ActionState.EXECUTING.value,
+                        "automatic": action.automatic,
+                    },
+                ),
+            )
+            return executing.model_dump(mode="json")
+
+        return Action.model_validate(reserve(transaction))
+
+    def update_invoice(self, tenant: TenantContext, invoice: Invoice) -> Invoice:
+        current = self.get_invoice(tenant, invoice.id)
+        if current.business_id != invoice.business_id:
+            raise ApiError(409, "invoice_conflict", "The invoice tenant changed unexpectedly.")
+        self._business_ref(tenant).collection("invoices").document(invoice.id).set(
+            invoice.model_dump(mode="json")
+        )
+        return invoice
+
+    def record_payment(self, tenant: TenantContext, payment: Payment) -> tuple[Payment, Invoice]:
+        business_ref = self._business_ref(tenant)
+        invoice_ref = business_ref.collection("invoices").document(payment.invoice_id)
+        payment_ref = business_ref.collection("payments").document(payment.id)
+        event_ref = self._client.collection("evidence_events").document(
+            f"evt_payment_recorded_{payment.id}"
+        )
+        close_event_ref = self._client.collection("evidence_events").document(
+            f"evt_invoice_closed_{payment.invoice_id}"
+        )
+        transaction = self._client.transaction()
+
+        @google_firestore.transactional
+        def record(txn: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+            invoice_snapshot = invoice_ref.get(transaction=txn)
+            if not invoice_snapshot.exists:
+                raise ApiError(404, "invoice_not_found", "The invoice could not be found.")
+            invoice = Invoice.model_validate(invoice_snapshot.to_dict())
+            existing = payment_ref.get(transaction=txn)
+            if existing.exists:
+                existing_payment = Payment.model_validate(existing.to_dict())
+                if existing_payment.model_dump(exclude={"created_at"}) != payment.model_dump(
+                    exclude={"created_at"}
+                ):
+                    raise ApiError(
+                        409, "payment_idempotency_conflict", "The payment key is already in use."
+                    )
+                return existing_payment.model_dump(mode="json"), invoice.model_dump(mode="json")
+            paid_total = invoice.verified_paid_minor + payment.amount_minor
+            if paid_total > invoice.amount_minor:
+                raise ApiError(409, "payment_exceeds_balance", "Payment exceeds the open balance.")
+            cancelled_action: Action | None = None
+            active_action_ref = None
+            if paid_total == invoice.amount_minor and invoice.active_action_id:
+                active_action_ref = business_ref.collection("actions").document(
+                    invoice.active_action_id
+                )
+                active_snapshot = active_action_ref.get(transaction=txn)
+                if active_snapshot.exists:
+                    active = Action.model_validate(active_snapshot.to_dict())
+                    if active.state in {
+                        ActionState.AWAITING_APPROVAL,
+                        ActionState.PROPOSED,
+                        ActionState.FAILED,
+                    }:
+                        cancelled_action = active.model_copy(
+                            update={
+                                "state": ActionState.CANCELLED,
+                                "cancelled_by": "payment-workflow",
+                                "cancelled_at": payment.created_at,
+                                "cancel_reason": "Invoice balance was fully paid.",
+                            }
+                        )
+            updated = invoice.model_copy(
+                update={
+                    "verified_paid_minor": paid_total,
+                    "updated_at": payment.created_at,
+                    "workflow_status": (
+                        InvoiceWorkflowStatus.CLOSED
+                        if paid_total == invoice.amount_minor
+                        else invoice.workflow_status
+                    ),
+                    "next_check_at": None
+                    if paid_total == invoice.amount_minor
+                    else invoice.next_check_at,
+                    "active_action_id": None
+                    if paid_total == invoice.amount_minor
+                    else invoice.active_action_id,
+                }
+            )
+            txn.create(payment_ref, payment.model_dump(mode="json"))
+            txn.set(invoice_ref, updated.model_dump(mode="json"))
+            if cancelled_action is not None and active_action_ref is not None:
+                txn.set(active_action_ref, cancelled_action.model_dump(mode="json"))
+                txn.create(
+                    self._client.collection("evidence_events").document(
+                        f"evt_action_cancelled_{cancelled_action.id}_payment"
+                    ),
+                    _event(
+                        event_type=EvidenceEventType.ACTION_CANCELLED,
+                        tenant=tenant,
+                        subject_type="action",
+                        subject_id=cancelled_action.id,
+                        actor_type="SYSTEM",
+                        properties={
+                            "invoice_id": invoice.id,
+                            "reason": "invoice_paid",
+                        },
+                    ),
+                )
+            txn.create(
+                event_ref,
+                _event(
+                    event_type=EvidenceEventType.PAYMENT_RECORDED,
+                    tenant=tenant,
+                    subject_type="payment",
+                    subject_id=payment.id,
+                    properties={
+                        "invoice_id": payment.invoice_id,
+                        "amount_minor": payment.amount_minor,
+                        "currency": payment.currency,
+                        "invoice_closed": paid_total == invoice.amount_minor,
+                    },
+                ),
+            )
+            if paid_total == invoice.amount_minor:
+                txn.create(
+                    close_event_ref,
+                    _event(
+                        event_type=EvidenceEventType.INVOICE_CLOSED,
+                        tenant=tenant,
+                        subject_type="invoice",
+                        subject_id=invoice.id,
+                        properties={"payment_id": payment.id},
+                    ),
+                )
+            return payment.model_dump(mode="json"), updated.model_dump(mode="json")
+
+        payment_data, invoice_data = record(transaction)
+        return Payment.model_validate(payment_data), Invoice.model_validate(invoice_data)
+
+    def list_payments(self, tenant: TenantContext, invoice_id: str | None = None) -> list[Payment]:
+        query = (
+            self._business_ref(tenant)
+            .collection("payments")
+            .order_by("created_at", direction=google_firestore.Query.DESCENDING)
+        )
+        if invoice_id:
+            self.get_invoice(tenant, invoice_id)
+            query = query.where("invoice_id", "==", invoice_id)
+        return [
+            Payment.model_validate(snapshot.to_dict()) for snapshot in query.limit(500).stream()
+        ]
+
+    def update_automation(self, tenant: TenantContext, enabled: bool) -> PolicyDefaults:
+        ref = self._client.collection("settings").document(tenant.business_id)
+        ref.set({"automation_enabled": enabled}, merge=True)
+        now = datetime.now(UTC)
+        self._client.collection("evidence_events").document(
+            f"evt_automation_{tenant.business_id}_{int(now.timestamp() * 1000)}"
+        ).create(
+            _event(
+                event_type=EvidenceEventType.AUTOMATION_CHANGED,
+                tenant=tenant,
+                subject_type="business",
+                subject_id=tenant.business_id,
+                properties={"enabled": enabled},
+            )
+        )
+        return self.get_policy_settings(tenant)
+
+    def create_oauth_state(self, tenant: TenantContext, state: GmailOAuthState) -> None:
+        if state.business_id != tenant.business_id or state.user_id != tenant.user_id:
+            raise ApiError(403, "oauth_state_tenant_mismatch", "OAuth state tenant mismatch.")
+        self._client.collection("oauth_states").document(state.state).create(
+            state.model_dump(mode="json")
+        )
+
+    def consume_oauth_state(self, state: str) -> GmailOAuthState:
+        ref = self._client.collection("oauth_states").document(state)
+        transaction = self._client.transaction()
+
+        @google_firestore.transactional
+        def consume(txn: Any) -> dict[str, Any]:
+            snapshot = ref.get(transaction=txn)
+            if not snapshot.exists:
+                raise ApiError(
+                    400, "invalid_oauth_state", "The Gmail connection request is invalid."
+                )
+            data = snapshot.to_dict() or {}
+            parsed = GmailOAuthState.model_validate(data)
+            txn.delete(ref)
+            return parsed.model_dump(mode="json")
+
+        result = GmailOAuthState.model_validate(consume(transaction))
+        if result.expires_at <= datetime.now(UTC):
+            raise ApiError(400, "expired_oauth_state", "The Gmail connection request expired.")
+        return result
+
+    def get_gmail_connection(self, business_id: str) -> GmailConnection | None:
+        snapshot = (
+            self._client.collection("businesses")
+            .document(business_id)
+            .collection("integrations")
+            .document("gmail")
+            .get()
+        )
+        return GmailConnection.model_validate(snapshot.to_dict()) if snapshot.exists else None
+
+    def save_gmail_connection(
+        self, tenant: TenantContext, connection: GmailConnection
+    ) -> GmailConnection:
+        if connection.business_id != tenant.business_id:
+            raise ApiError(403, "gmail_tenant_mismatch", "Gmail connection tenant mismatch.")
+        ref = self._business_ref(tenant).collection("integrations").document("gmail")
+        ref.set(connection.model_dump(mode="json"))
+        self._client.collection("evidence_events").document(
+            f"evt_gmail_connected_{tenant.business_id}_{int(connection.connected_at.timestamp())}"
+        ).create(
+            _event(
+                event_type=EvidenceEventType.GMAIL_CONNECTED,
+                tenant=tenant,
+                subject_type="business",
+                subject_id=tenant.business_id,
+                properties={"connected": True},
+            )
+        )
+        return connection
+
+    def disconnect_gmail(self, tenant: TenantContext) -> None:
+        connection = self.get_gmail_connection(tenant.business_id)
+        if connection is None:
+            return
+        now = datetime.now(UTC)
+        updated = connection.model_copy(
+            update={"encrypted_refresh_token": "", "disconnected_at": now, "updated_at": now}
+        )
+        self._business_ref(tenant).collection("integrations").document("gmail").set(
+            updated.model_dump(mode="json")
+        )
+        self._client.collection("evidence_events").document(
+            f"evt_gmail_disconnected_{tenant.business_id}_{int(now.timestamp())}"
+        ).create(
+            _event(
+                event_type=EvidenceEventType.GMAIL_DISCONNECTED,
+                tenant=tenant,
+                subject_type="business",
+                subject_id=tenant.business_id,
+                properties={"connected": False},
+            )
+        )
+
+    def claim_due_invoices(
+        self, now: datetime, limit: int, lease_minutes: int
+    ) -> list[tuple[TenantContext, Invoice]]:
+        snapshots = list(
+            self._client.collection_group("invoices")
+            .where("workflow_status", "==", InvoiceWorkflowStatus.OPEN.value)
+            .where("next_check_at", "<=", now.isoformat())
+            .order_by("next_check_at")
+            .limit(limit * 2)
+            .stream()
+        )
+        claimed: list[tuple[TenantContext, Invoice]] = []
+        lease_until = now + timedelta(minutes=lease_minutes)
+        for snapshot in snapshots:
+            if len(claimed) >= limit:
+                break
+            candidate_ref = snapshot.reference
+            transaction = self._client.transaction()
+
+            @google_firestore.transactional
+            def claim(txn: Any, ref: Any = candidate_ref) -> dict[str, Any] | None:
+                current_snapshot = ref.get(transaction=txn)
+                if not current_snapshot.exists:
+                    return None
+                current = Invoice.model_validate(current_snapshot.to_dict())
+                if (
+                    current.workflow_status != InvoiceWorkflowStatus.OPEN
+                    or current.next_check_at is None
+                    or current.next_check_at > now
+                    or (
+                        current.evaluation_lease_until is not None
+                        and current.evaluation_lease_until > now
+                    )
+                ):
+                    return None
+                claimed_value = current.model_copy(update={"evaluation_lease_until": lease_until})
+                txn.update(
+                    ref,
+                    {"evaluation_lease_until": lease_until.isoformat()},
+                )
+                return claimed_value.model_dump(mode="json")
+
+            claimed_data = claim(transaction)
+            if claimed_data is None:
+                continue
+            claimed_invoice = Invoice.model_validate(claimed_data)
+            claimed.append(
+                (
+                    TenantContext(
+                        user_id="cloud-scheduler",
+                        business_id=claimed_invoice.business_id,
+                        role=MembershipRole.OWNER,
+                    ),
+                    claimed_invoice,
+                )
+            )
+        return claimed
+
+    def list_all_invoices(self, tenant: TenantContext | None = None) -> list[Invoice]:
+        if tenant:
+            snapshots = self._business_ref(tenant).collection("invoices").limit(5000).stream()
+        else:
+            snapshots = self._client.collection_group("invoices").limit(5000).stream()
+        return [Invoice.model_validate(snapshot.to_dict()) for snapshot in snapshots]
+
+    def list_all_agent_runs(self, tenant: TenantContext | None = None) -> list[AgentRun]:
+        if tenant:
+            snapshots = self._business_ref(tenant).collection("agent_runs").limit(5000).stream()
+        else:
+            snapshots = self._client.collection_group("agent_runs").limit(5000).stream()
+        return [AgentRun.model_validate(snapshot.to_dict()) for snapshot in snapshots]
+
+    def list_all_action_records(self, tenant: TenantContext | None = None) -> list[Action]:
+        if tenant:
+            return [
+                Action.model_validate(snapshot.to_dict())
+                for snapshot in self._business_ref(tenant)
+                .collection("actions")
+                .limit(5000)
+                .stream()
+            ]
+        return [
+            Action.model_validate(snapshot.to_dict())
+            for snapshot in self._client.collection_group("actions").limit(5000).stream()
+        ]
+
+    def list_businesses(self) -> list[Business]:
+        return [
+            self._parse_business(snapshot.id, snapshot.to_dict() or {})
+            for snapshot in self._client.collection("businesses").limit(5000).stream()
+        ]
+
+    def get_business_by_id(self, business_id: str) -> Business:
+        snapshot = self._client.collection("businesses").document(business_id).get()
+        if not snapshot.exists:
+            raise ApiError(404, "business_not_found", "The business could not be found.")
+        return self._parse_business(business_id, snapshot.to_dict() or {})
+
+    def classify_business(
+        self,
+        business_id: str,
+        classification: DataClassification,
+        relationship: BusinessRelationship,
+    ) -> Business:
+        ref = self._client.collection("businesses").document(business_id)
+        snapshot = ref.get()
+        if not snapshot.exists:
+            raise ApiError(404, "business_not_found", "The business could not be found.")
+        ref.update(
+            {"data_classification": classification.value, "relationship": relationship.value}
+        )
+        data = snapshot.to_dict() or {}
+        data.update(
+            {"data_classification": classification.value, "relationship": relationship.value}
+        )
+        return self._parse_business(business_id, data)
+
+    def create_ledger_entry(self, entry: EvidenceLedgerEntry) -> EvidenceLedgerEntry:
+        ref = self._client.collection("evidence_ledger").document(entry.id)
+        event_ref = self._client.collection("evidence_events").document(
+            f"evt_evidence_ledger_{entry.id}"
+        )
+        batch = self._client.batch()
+        try:
+            batch.create(ref, entry.model_dump(mode="json"))
+            batch.create(
+                event_ref,
+                {
+                    "schema_version": 1,
+                    "event_type": EvidenceEventType.EVIDENCE_LEDGER_RECORDED.value,
+                    "business_id": entry.business_id or "platform",
+                    "actor_type": "USER",
+                    "actor_id": entry.created_by,
+                    "subject_type": "evidence_ledger",
+                    "subject_id": entry.id,
+                    "occurred_at": entry.created_at.isoformat(),
+                    "source": "api",
+                    "properties": {
+                        "kind": entry.kind.value,
+                        "amount_minor": entry.amount_minor,
+                        "currency": entry.currency,
+                        "reversal_of": entry.reversal_of,
+                    },
+                },
+            )
+            batch.commit()
+        except Exception as exc:
+            if ref.get().exists:
+                raise ApiError(
+                    409, "ledger_entry_exists", "The ledger entry already exists."
+                ) from exc
+            raise
+        return entry
+
+    def list_ledger_entries(self) -> list[EvidenceLedgerEntry]:
+        snapshots = (
+            self._client.collection("evidence_ledger")
+            .order_by("created_at", direction=google_firestore.Query.DESCENDING)
+            .limit(5000)
+            .stream()
+        )
+        return [EvidenceLedgerEntry.model_validate(snapshot.to_dict()) for snapshot in snapshots]
+
     def _business_ref(self, tenant: TenantContext) -> Any:
         return self._client.collection("businesses").document(tenant.business_id)
 
@@ -471,6 +1198,8 @@ class FirestoreRepository:
             name=str(data["name"]),
             owner_user_id=str(data["owner_user_id"]),
             created_at=data["created_at"],
+            data_classification=data.get("data_classification", DataClassification.UNCLASSIFIED),
+            relationship=data.get("relationship", BusinessRelationship.UNCLASSIFIED),
         )
 
     @staticmethod
@@ -495,6 +1224,11 @@ class InMemoryRepository:
         self.invoices: dict[str, Invoice] = {}
         self.actions: dict[str, Action] = {}
         self.agent_runs: dict[str, AgentRun] = {}
+        self.payments: dict[str, Payment] = {}
+        self.action_attempts: dict[str, ActionAttempt] = {}
+        self.oauth_states: dict[str, GmailOAuthState] = {}
+        self.gmail_connections: dict[str, GmailConnection] = {}
+        self.ledger_entries: dict[str, EvidenceLedgerEntry] = {}
         self.evidence_events: dict[str, dict[str, Any]] = {}
         self.policy_settings: dict[str, PolicyDefaults] = {}
         self._id_counter = 0
@@ -648,7 +1382,9 @@ class InMemoryRepository:
             reverse=True,
         )
 
-    def save_evaluation(self, tenant: TenantContext, run: AgentRun, action: Action | None) -> None:
+    def save_evaluation(
+        self, tenant: TenantContext, run: AgentRun, action: Action | None
+    ) -> Action | None:
         self.get_invoice(tenant, run.invoice_id)
         self.agent_runs[run.id] = run
         if run.model_proposal is not None:
@@ -675,7 +1411,27 @@ class InMemoryRepository:
                 actor_type="SYSTEM",
             )
         if action:
+            existing = next(
+                (
+                    candidate
+                    for candidate in self.actions.values()
+                    if action.action_key and candidate.action_key == action.action_key
+                ),
+                None,
+            )
+            if existing:
+                return existing
             self.actions[action.id] = action
+            invoice = self.invoices[run.invoice_id]
+            self.invoices[run.invoice_id] = invoice.model_copy(
+                update={
+                    "active_action_id": action.id,
+                    "reminder_sequence": action.reminder_sequence,
+                    "workflow_status": InvoiceWorkflowStatus.PAUSED,
+                    "next_check_at": None,
+                    "evaluation_lease_until": None,
+                }
+            )
             self.evidence_events[f"evt_action_{action.id}"] = _event(
                 event_type=EvidenceEventType.ACTION_PROPOSED,
                 tenant=tenant,
@@ -684,6 +1440,7 @@ class InMemoryRepository:
                 properties={"invoice_id": action.invoice_id, "state": action.state.value},
                 actor_type="AGENT",
             )
+        return action
 
     def list_agent_runs(
         self, tenant: TenantContext, invoice_id: str | None, limit: int, cursor: str | None
@@ -710,3 +1467,375 @@ class InMemoryRepository:
         selected = runs[start : start + limit]
         has_more = start + limit < len(runs)
         return selected, _cursor_encode(selected[-1].id) if has_more and selected else None
+
+    def list_all_actions(
+        self, tenant: TenantContext, state: ActionState | None, limit: int, cursor: str | None
+    ) -> tuple[list[Action], str | None]:
+        actions = sorted(
+            (
+                action
+                for action in self.actions.values()
+                if self.invoices.get(action.invoice_id)
+                and self.invoices[action.invoice_id].business_id == tenant.business_id
+                and (state is None or action.state == state)
+            ),
+            key=lambda item: (item.created_at, item.id),
+            reverse=True,
+        )
+        start = 0
+        if cursor:
+            cursor_id = _cursor_decode(cursor)
+            try:
+                start = next(i for i, item in enumerate(actions) if item.id == cursor_id) + 1
+            except StopIteration:
+                raise ApiError(422, "invalid_cursor", "The pagination cursor is invalid.") from None
+        selected = actions[start : start + limit]
+        return (
+            selected,
+            _cursor_encode(selected[-1].id) if start + limit < len(actions) and selected else None,
+        )
+
+    def get_action(self, tenant: TenantContext, action_id: str) -> Action:
+        action = self.actions.get(action_id)
+        if action is None:
+            raise ApiError(404, "action_not_found", "The action could not be found.")
+        self.get_invoice(tenant, action.invoice_id)
+        return action
+
+    def update_action(
+        self,
+        tenant: TenantContext,
+        action: Action,
+        attempt: ActionAttempt | None,
+        event_type: EvidenceEventType,
+        actor_type: str,
+    ) -> Action:
+        self.get_action(tenant, action.id)
+        self.actions[action.id] = action
+        if attempt:
+            self.action_attempts[attempt.id] = attempt
+        event_id = (
+            f"evt_{event_type.value.replace('.', '_')}_{action.id}_"
+            f"{action.state.value.lower()}_{action.attempt_count}"
+        )
+        self.evidence_events[event_id] = _event(
+            event_type=event_type,
+            tenant=tenant,
+            subject_type="action",
+            subject_id=action.id,
+            actor_type=actor_type,
+            properties={
+                "invoice_id": action.invoice_id,
+                "state": action.state.value,
+                "automatic": action.automatic,
+                "failure_code": action.failure_code,
+                "provider_message_id": action.provider_message_id,
+            },
+        )
+        return action
+
+    def reserve_action_execution(
+        self,
+        tenant: TenantContext,
+        action: Action,
+        expected_state: ActionState,
+        actor_type: str,
+    ) -> Action:
+        current = self.get_action(tenant, action.id)
+        if current.state != expected_state:
+            raise ApiError(409, "action_not_executable", "The action state changed.")
+        now = datetime.now(UTC)
+        executing = action.model_copy(
+            update={
+                "state": ActionState.EXECUTING,
+                "attempt_count": current.attempt_count + 1,
+                "execution_started_at": now,
+                "execution_completed_at": None,
+                "failure_code": None,
+                "failure_message": None,
+                "delivery_possible": None,
+            }
+        )
+        self.actions[action.id] = executing
+        if expected_state in {ActionState.AWAITING_APPROVAL, ActionState.FAILED}:
+            self.evidence_events[f"evt_action_approved_{action.id}_{executing.attempt_count}"] = (
+                _event(
+                    event_type=EvidenceEventType.ACTION_APPROVED,
+                    tenant=tenant,
+                    subject_type="action",
+                    subject_id=action.id,
+                    actor_type=actor_type,
+                    properties={"invoice_id": action.invoice_id},
+                )
+            )
+        self.evidence_events[f"evt_action_executing_{action.id}_{executing.attempt_count}"] = (
+            _event(
+                event_type=EvidenceEventType.ACTION_EXECUTED,
+                tenant=tenant,
+                subject_type="action",
+                subject_id=action.id,
+                actor_type=actor_type,
+                properties={
+                    "invoice_id": action.invoice_id,
+                    "state": ActionState.EXECUTING.value,
+                    "automatic": action.automatic,
+                },
+            )
+        )
+        return executing
+
+    def update_invoice(self, tenant: TenantContext, invoice: Invoice) -> Invoice:
+        self.get_invoice(tenant, invoice.id)
+        self.invoices[invoice.id] = invoice
+        return invoice
+
+    def record_payment(self, tenant: TenantContext, payment: Payment) -> tuple[Payment, Invoice]:
+        invoice = self.get_invoice(tenant, payment.invoice_id)
+        existing = self.payments.get(payment.id)
+        if existing:
+            if existing.model_dump(exclude={"created_at"}) != payment.model_dump(
+                exclude={"created_at"}
+            ):
+                raise ApiError(
+                    409, "payment_idempotency_conflict", "The payment key is already in use."
+                )
+            return existing, invoice
+        paid_total = invoice.verified_paid_minor + payment.amount_minor
+        if paid_total > invoice.amount_minor:
+            raise ApiError(409, "payment_exceeds_balance", "Payment exceeds the open balance.")
+        updated = invoice.model_copy(
+            update={
+                "verified_paid_minor": paid_total,
+                "updated_at": payment.created_at,
+                "workflow_status": (
+                    InvoiceWorkflowStatus.CLOSED
+                    if paid_total == invoice.amount_minor
+                    else invoice.workflow_status
+                ),
+                "next_check_at": None
+                if paid_total == invoice.amount_minor
+                else invoice.next_check_at,
+                "active_action_id": None
+                if paid_total == invoice.amount_minor
+                else invoice.active_action_id,
+            }
+        )
+        self.payments[payment.id] = payment
+        self.invoices[invoice.id] = updated
+        if paid_total == invoice.amount_minor and invoice.active_action_id:
+            active = self.actions.get(invoice.active_action_id)
+            if active and active.state in {
+                ActionState.PROPOSED,
+                ActionState.AWAITING_APPROVAL,
+                ActionState.FAILED,
+            }:
+                cancelled = active.model_copy(
+                    update={
+                        "state": ActionState.CANCELLED,
+                        "cancel_reason": "Invoice balance was fully paid.",
+                        "cancelled_at": payment.created_at,
+                        "updated_at": payment.created_at,
+                    }
+                )
+                self.actions[active.id] = cancelled
+                self.evidence_events[f"evt_action_cancelled_{active.id}_payment"] = _event(
+                    event_type=EvidenceEventType.ACTION_CANCELLED,
+                    tenant=tenant,
+                    subject_type="action",
+                    subject_id=active.id,
+                    actor_type="SYSTEM",
+                    properties={
+                        "invoice_id": invoice.id,
+                        "reason": "invoice_fully_paid",
+                    },
+                )
+        self.evidence_events[f"evt_payment_recorded_{payment.id}"] = _event(
+            event_type=EvidenceEventType.PAYMENT_RECORDED,
+            tenant=tenant,
+            subject_type="payment",
+            subject_id=payment.id,
+            properties={
+                "invoice_id": payment.invoice_id,
+                "amount_minor": payment.amount_minor,
+                "currency": payment.currency,
+                "invoice_closed": paid_total == invoice.amount_minor,
+            },
+        )
+        if paid_total == invoice.amount_minor:
+            self.evidence_events[f"evt_invoice_closed_{invoice.id}"] = _event(
+                event_type=EvidenceEventType.INVOICE_CLOSED,
+                tenant=tenant,
+                subject_type="invoice",
+                subject_id=invoice.id,
+                properties={"payment_id": payment.id},
+            )
+        return payment, updated
+
+    def list_payments(self, tenant: TenantContext, invoice_id: str | None = None) -> list[Payment]:
+        if invoice_id:
+            self.get_invoice(tenant, invoice_id)
+        return sorted(
+            (
+                payment
+                for payment in self.payments.values()
+                if payment.business_id == tenant.business_id
+                and (invoice_id is None or payment.invoice_id == invoice_id)
+            ),
+            key=lambda payment: payment.created_at,
+            reverse=True,
+        )
+
+    def update_automation(self, tenant: TenantContext, enabled: bool) -> PolicyDefaults:
+        current = self.get_policy_settings(tenant)
+        updated = current.model_copy(update={"automation_enabled": enabled})
+        self.policy_settings[tenant.business_id] = updated
+        self.evidence_events[f"evt_automation_{tenant.business_id}_{len(self.evidence_events)}"] = (
+            _event(
+                event_type=EvidenceEventType.AUTOMATION_CHANGED,
+                tenant=tenant,
+                subject_type="business",
+                subject_id=tenant.business_id,
+                properties={"enabled": enabled},
+            )
+        )
+        return updated
+
+    def create_oauth_state(self, tenant: TenantContext, state: GmailOAuthState) -> None:
+        if state.business_id != tenant.business_id or state.user_id != tenant.user_id:
+            raise ApiError(403, "oauth_state_tenant_mismatch", "OAuth state tenant mismatch.")
+        if state.state in self.oauth_states:
+            raise ApiError(409, "oauth_state_conflict", "OAuth state already exists.")
+        self.oauth_states[state.state] = state
+
+    def consume_oauth_state(self, state: str) -> GmailOAuthState:
+        result = self.oauth_states.pop(state, None)
+        if result is None:
+            raise ApiError(400, "invalid_oauth_state", "The Gmail connection request is invalid.")
+        if result.expires_at <= datetime.now(UTC):
+            raise ApiError(400, "expired_oauth_state", "The Gmail connection request expired.")
+        return result
+
+    def get_gmail_connection(self, business_id: str) -> GmailConnection | None:
+        return self.gmail_connections.get(business_id)
+
+    def save_gmail_connection(
+        self, tenant: TenantContext, connection: GmailConnection
+    ) -> GmailConnection:
+        if connection.business_id != tenant.business_id:
+            raise ApiError(403, "gmail_tenant_mismatch", "Gmail connection tenant mismatch.")
+        self.gmail_connections[tenant.business_id] = connection
+        return connection
+
+    def disconnect_gmail(self, tenant: TenantContext) -> None:
+        connection = self.gmail_connections.get(tenant.business_id)
+        if connection:
+            now = datetime.now(UTC)
+            self.gmail_connections[tenant.business_id] = connection.model_copy(
+                update={"encrypted_refresh_token": "", "disconnected_at": now, "updated_at": now}
+            )
+
+    def claim_due_invoices(
+        self, now: datetime, limit: int, lease_minutes: int
+    ) -> list[tuple[TenantContext, Invoice]]:
+        due = sorted(
+            (
+                invoice
+                for invoice in self.invoices.values()
+                if invoice.workflow_status == InvoiceWorkflowStatus.OPEN
+                and invoice.next_check_at is not None
+                and invoice.next_check_at <= now
+                and (
+                    invoice.evaluation_lease_until is None or invoice.evaluation_lease_until <= now
+                )
+            ),
+            key=lambda invoice: invoice.next_check_at or now,
+        )[:limit]
+        result: list[tuple[TenantContext, Invoice]] = []
+        for invoice in due:
+            claimed = invoice.model_copy(
+                update={"evaluation_lease_until": now + timedelta(minutes=lease_minutes)}
+            )
+            self.invoices[invoice.id] = claimed
+            result.append(
+                (
+                    TenantContext("cloud-scheduler", invoice.business_id, MembershipRole.OWNER),
+                    claimed,
+                )
+            )
+        return result
+
+    def list_all_invoices(self, tenant: TenantContext | None = None) -> list[Invoice]:
+        return [
+            invoice
+            for invoice in self.invoices.values()
+            if tenant is None or invoice.business_id == tenant.business_id
+        ]
+
+    def list_all_agent_runs(self, tenant: TenantContext | None = None) -> list[AgentRun]:
+        return [
+            run
+            for run in self.agent_runs.values()
+            if tenant is None or run.business_id == tenant.business_id
+        ]
+
+    def list_all_action_records(self, tenant: TenantContext | None = None) -> list[Action]:
+        if tenant is None:
+            return list(self.actions.values())
+        return [
+            action
+            for action in self.actions.values()
+            if self.invoices.get(action.invoice_id)
+            and self.invoices[action.invoice_id].business_id == tenant.business_id
+        ]
+
+    def list_businesses(self) -> list[Business]:
+        return list(self.businesses.values())
+
+    def get_business_by_id(self, business_id: str) -> Business:
+        business = self.businesses.get(business_id)
+        if business is None:
+            raise ApiError(404, "business_not_found", "The business could not be found.")
+        return business
+
+    def classify_business(
+        self,
+        business_id: str,
+        classification: DataClassification,
+        relationship: BusinessRelationship,
+    ) -> Business:
+        business = self.businesses.get(business_id)
+        if business is None:
+            raise ApiError(404, "business_not_found", "The business could not be found.")
+        updated = business.model_copy(
+            update={"data_classification": classification, "relationship": relationship}
+        )
+        self.businesses[business_id] = updated
+        return updated
+
+    def create_ledger_entry(self, entry: EvidenceLedgerEntry) -> EvidenceLedgerEntry:
+        if entry.id in self.ledger_entries:
+            raise ApiError(409, "ledger_entry_exists", "The ledger entry already exists.")
+        self.ledger_entries[entry.id] = entry
+        self.evidence_events[f"evt_evidence_ledger_{entry.id}"] = {
+            "schema_version": 1,
+            "event_type": EvidenceEventType.EVIDENCE_LEDGER_RECORDED.value,
+            "business_id": entry.business_id or "platform",
+            "actor_type": "USER",
+            "actor_id": entry.created_by,
+            "subject_type": "evidence_ledger",
+            "subject_id": entry.id,
+            "occurred_at": entry.created_at.isoformat(),
+            "source": "api",
+            "properties": {
+                "kind": entry.kind.value,
+                "amount_minor": entry.amount_minor,
+                "currency": entry.currency,
+                "reversal_of": entry.reversal_of,
+            },
+        }
+        return entry
+
+    def list_ledger_entries(self) -> list[EvidenceLedgerEntry]:
+        return sorted(
+            self.ledger_entries.values(), key=lambda entry: entry.created_at, reverse=True
+        )

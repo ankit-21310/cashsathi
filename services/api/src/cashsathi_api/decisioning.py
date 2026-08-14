@@ -85,7 +85,9 @@ class GeminiDecisionAdapter:
         }
         prompt = (
             "Choose exactly one safe receivables decision from the schema. Do not write an email, "
-            "make legal claims, infer payment, or add facts. Keep rationale concise and internal. "
+            "make legal claims, infer payment, or add facts. For SEND_REMINDER choose only a "
+            "WARM or NEUTRAL reminder tone and a due-state reminder intent; deterministic code "
+            "will render the message. Keep rationale concise and internal. "
             f"Decision facts: {json.dumps(facts, separators=(',', ':'))}"
         )
         started = time.perf_counter()

@@ -34,6 +34,18 @@ class Settings(BaseSettings):
     max_pdf_bytes: int = Field(default=10 * 1024 * 1024, ge=1024)
     max_pdf_pages: int = Field(default=25, ge=1, le=1000)
     gemini_timeout_seconds: int = Field(default=45, ge=5, le=110)
+    web_base_url: str = "http://localhost:3000"
+    gmail_oauth_client_id: SecretStr | None = None
+    gmail_oauth_client_secret: SecretStr | None = None
+    gmail_oauth_redirect_uri: str = "http://localhost:8000/api/integrations/gmail/callback"
+    gmail_kms_key_name: str | None = None
+    gmail_timeout_seconds: int = Field(default=20, ge=5, le=60)
+    scheduler_service_account_email: str | None = None
+    scheduler_audience: str | None = None
+    scheduler_batch_size: int = Field(default=20, ge=1, le=100)
+    scheduler_concurrency: int = Field(default=3, ge=1, le=10)
+    action_execution_timeout_minutes: int = Field(default=10, ge=1, le=60)
+    platform_admin_uids: str = ""
 
     @property
     def cors_origins(self) -> list[str]:
@@ -42,6 +54,23 @@ class Settings(BaseSettings):
             for origin in self.cors_allowed_origins.split(",")
             if origin.strip()
         ]
+
+    @property
+    def admin_uids(self) -> set[str]:
+        return {uid.strip() for uid in self.platform_admin_uids.split(",") if uid.strip()}
+
+    @property
+    def local_emulators_enabled(self) -> bool:
+        local_prefixes = ("127.0.0.1:", "localhost:")
+        auth_host = self.firebase_auth_emulator_host
+        firestore_host = self.firestore_emulator_host
+        return (
+            self.app_env != "production"
+            and auth_host is not None
+            and firestore_host is not None
+            and auth_host.startswith(local_prefixes)
+            and firestore_host.startswith(local_prefixes)
+        )
 
     @model_validator(mode="after")
     def reject_production_emulators(self) -> "Settings":
@@ -57,6 +86,8 @@ class Settings(BaseSettings):
             origin.startswith("http://") for origin in self.cors_origins
         ):
             raise ValueError("Production CORS origins must use HTTPS")
+        if self.app_env == "production" and not self.web_base_url.startswith("https://"):
+            raise ValueError("Production web base URL must use HTTPS")
         return self
 
 

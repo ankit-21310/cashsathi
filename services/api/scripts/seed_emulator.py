@@ -10,7 +10,11 @@ from firebase_admin import auth
 
 from cashsathi_api.auth import initialize_firebase
 from cashsathi_api.config import Settings
-from cashsathi_api.domain import AuthenticatedUser
+from cashsathi_api.domain import (
+    AuthenticatedUser,
+    BusinessRelationship,
+    DataClassification,
+)
 from cashsathi_api.repository import FirestoreRepository
 
 
@@ -40,8 +44,11 @@ def main() -> None:
             auth.get_user(uid)
         except auth.UserNotFoundError:
             auth.create_user(uid=uid, email=email, password=password, display_name=business_name)
-        repository.get_or_create_business(
+        business, _membership = repository.get_or_create_business(
             AuthenticatedUser(uid=uid, email=email, display_name=business_name), business_name
+        )
+        repository.classify_business(
+            business.id, DataClassification.DEMO, BusinessRelationship.UNCLASSIFIED
         )
         print(f"Seeded {email} -> {business_name}")
 

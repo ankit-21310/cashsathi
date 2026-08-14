@@ -26,6 +26,12 @@ class EvidenceEventType(StrEnum):
     ACTION_EXECUTED = "action.executed"
     PAYMENT_RECORDED = "payment.recorded"
     INVOICE_CLOSED = "invoice.closed"
+    ACTION_CANCELLED = "action.cancelled"
+    ACTION_RESOLVED = "action.resolved"
+    GMAIL_CONNECTED = "gmail.connected"
+    GMAIL_DISCONNECTED = "gmail.disconnected"
+    AUTOMATION_CHANGED = "automation.changed"
+    EVIDENCE_LEDGER_RECORDED = "evidence.ledger_recorded"
 
 
 class InvoiceState(StrEnum):
@@ -68,6 +74,47 @@ class Confidence(StrEnum):
     LOW = "LOW"
 
 
+class DataClassification(StrEnum):
+    UNCLASSIFIED = "UNCLASSIFIED"
+    DEMO = "DEMO"
+    REAL = "REAL"
+
+
+class BusinessRelationship(StrEnum):
+    UNCLASSIFIED = "UNCLASSIFIED"
+    ARMS_LENGTH = "ARMS_LENGTH"
+    RELATED = "RELATED"
+    PREEXISTING = "PREEXISTING"
+
+
+class InvoiceWorkflowStatus(StrEnum):
+    OPEN = "OPEN"
+    PAUSED = "PAUSED"
+    CLOSED = "CLOSED"
+
+
+class ReminderTone(StrEnum):
+    WARM = "WARM"
+    NEUTRAL = "NEUTRAL"
+
+
+class ReminderIntent(StrEnum):
+    DUE_SOON = "DUE_SOON"
+    DUE_TODAY = "DUE_TODAY"
+    OVERDUE_FOLLOWUP = "OVERDUE_FOLLOWUP"
+
+
+class ActionResolution(StrEnum):
+    CONFIRMED_DELIVERED = "CONFIRMED_DELIVERED"
+    CONFIRMED_NOT_DELIVERED = "CONFIRMED_NOT_DELIVERED"
+    MANUALLY_SENT = "MANUALLY_SENT"
+
+
+class LedgerKind(StrEnum):
+    PRODUCT_REVENUE = "PRODUCT_REVENUE"
+    EXPENSE = "EXPENSE"
+
+
 @dataclass(frozen=True, slots=True)
 class AuthenticatedUser:
     uid: str
@@ -91,6 +138,7 @@ class PolicyDefaults(BaseModel):
     dispute_requires_human: bool = True
     legal_language_allowed: bool = False
     payment_confirmation_required: bool = True
+    automation_enabled: bool = False
 
 
 class BusinessCreate(BaseModel):
@@ -102,6 +150,8 @@ class Business(BaseModel):
     name: str
     owner_user_id: str
     created_at: datetime
+    data_classification: DataClassification = DataClassification.UNCLASSIFIED
+    relationship: BusinessRelationship = BusinessRelationship.UNCLASSIFIED
 
 
 class Membership(BaseModel):
@@ -251,6 +301,11 @@ class Invoice(BaseModel):
     confirmation_hash: str
     created_at: datetime
     updated_at: datetime
+    next_check_at: datetime | None = None
+    workflow_status: InvoiceWorkflowStatus = InvoiceWorkflowStatus.OPEN
+    evaluation_lease_until: datetime | None = None
+    active_action_id: str | None = None
+    reminder_sequence: int = Field(default=0, ge=0)
 
 
 class InvoiceSummary(BaseModel):
@@ -275,6 +330,8 @@ class ModelDecision(BaseModel):
     risk_flags: list[str] = Field(default_factory=list, max_length=20)
     requires_human_approval: bool = False
     next_check_at: datetime | None = None
+    reminder_tone: ReminderTone | None = None
+    reminder_intent: ReminderIntent | None = None
 
     @field_validator("next_check_at")
     @classmethod
@@ -284,6 +341,17 @@ class ModelDecision(BaseModel):
         if value.tzinfo is None:
             raise ValueError("next_check_at must include a timezone")
         return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def reminder_brief_matches_decision(self) -> "ModelDecision":
+        if self.decision == AgentDecision.SEND_REMINDER:
+            if self.reminder_tone is None:
+                self.reminder_tone = ReminderTone.WARM
+            if self.reminder_intent is None:
+                self.reminder_intent = ReminderIntent.OVERDUE_FOLLOWUP
+        elif self.reminder_tone is not None or self.reminder_intent is not None:
+            raise ValueError("reminder fields are only valid for SEND_REMINDER")
+        return self
 
 
 class PolicyResult(BaseModel):
@@ -302,6 +370,54 @@ class Action(BaseModel):
     action_type: Literal["SEND_REMINDER"] = "SEND_REMINDER"
     state: ActionState
     created_at: datetime
+    action_key: str = ""
+    recipient_email: str | None = None
+    subject: str | None = None
+    body: str | None = None
+    automatic: bool = False
+    approved_by: str | None = None
+    approved_at: datetime | None = None
+    cancelled_by: str | None = None
+    cancelled_at: datetime | None = None
+    cancel_reason: str | None = None
+    execution_started_at: datetime | None = None
+    execution_completed_at: datetime | None = None
+    provider_message_id: str | None = None
+    failure_code: str | None = None
+    failure_message: str | None = None
+    delivery_possible: bool | None = None
+    resolution: ActionResolution | None = None
+    resolved_by: str | None = None
+    resolved_at: datetime | None = None
+    attempt_count: int = Field(default=0, ge=0)
+    reminder_sequence: int = Field(default=0, ge=0)
+
+
+class ActionPage(BaseModel):
+    items: list[Action]
+    next_cursor: str | None
+
+
+class ActionCancel(BaseModel):
+    reason: str = Field(min_length=2, max_length=240)
+
+
+class ActionResolve(BaseModel):
+    resolution: ActionResolution
+    confirmed: Literal[True]
+
+
+class ActionAttempt(BaseModel):
+    id: str
+    action_id: str
+    attempt_number: int = Field(ge=1)
+    state: ActionState
+    automatic: bool
+    provider_message_id: str | None = None
+    failure_code: str | None = None
+    delivery_possible: bool | None = None
+    started_at: datetime
+    completed_at: datetime | None = None
 
 
 class AgentRunStatus(StrEnum):
@@ -326,6 +442,7 @@ class AgentRun(BaseModel):
     output_tokens: int | None = None
     failure_code: str | None = None
     created_at: datetime
+    action_id: str | None = None
 
 
 class AgentRunPage(BaseModel):
@@ -343,6 +460,167 @@ class InvoiceDetail(BaseModel):
     current_state: InvoiceState
     latest_agent_run: AgentRun | None
     latest_action: Action | None
+
+
+class PaymentCreate(BaseModel):
+    amount_decimal: str = Field(min_length=1, max_length=40)
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    paid_at: datetime
+    reference: str = Field(min_length=1, max_length=160)
+    idempotency_key: str = Field(min_length=8, max_length=100)
+    confirmed: Literal[True]
+
+    @field_validator("currency", mode="before")
+    @classmethod
+    def normalize_payment_currency(cls, value: object) -> object:
+        return value.strip().upper() if isinstance(value, str) else value
+
+    @field_validator("paid_at")
+    @classmethod
+    def paid_at_must_be_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("paid_at must include a timezone")
+        return value.astimezone(UTC)
+
+
+class Payment(BaseModel):
+    id: str
+    invoice_id: str
+    business_id: str
+    amount_minor: int = Field(gt=0)
+    currency: str
+    paid_at: datetime
+    reference: str
+    idempotency_key: str
+    confirmed_by: str
+    created_at: datetime
+
+
+class TimelineEntry(BaseModel):
+    id: str
+    entry_type: str
+    title: str
+    detail: str
+    occurred_at: datetime
+    status: str | None = None
+
+
+class InvoiceTimeline(BaseModel):
+    items: list[TimelineEntry]
+
+
+class GmailStatus(BaseModel):
+    connected: bool
+    connected_at: datetime | None = None
+    last_error_code: str | None = None
+    automation_enabled: bool = False
+
+
+class GmailConnectResponse(BaseModel):
+    authorization_url: str
+
+
+class GmailOAuthState(BaseModel):
+    state: str
+    business_id: str
+    user_id: str
+    code_verifier: str
+    expires_at: datetime
+    created_at: datetime
+
+
+class GmailConnection(BaseModel):
+    business_id: str
+    encrypted_refresh_token: str
+    kms_key_name: str
+    connected_at: datetime
+    updated_at: datetime
+    disconnected_at: datetime | None = None
+    last_error_code: str | None = None
+
+
+class AutomationUpdate(BaseModel):
+    enabled: bool
+    confirmed: Literal[True]
+
+
+class CurrencyMetrics(BaseModel):
+    currency: str
+    monitored_minor: int
+    outstanding_minor: int
+    overdue_minor: int
+    verified_paid_minor: int
+    post_action_paid_minor: int
+
+
+class MetricsResponse(BaseModel):
+    currencies: list[CurrencyMetrics]
+    invoice_count: int
+    overdue_count: int
+    human_review_count: int
+    ai_decisions: int
+    successful_actions: int
+    automatic_successful_actions: int
+    automation_rate: float
+    average_days_overdue: float
+    pending_approvals: int
+
+
+class BusinessClassificationUpdate(BaseModel):
+    data_classification: DataClassification
+    relationship: BusinessRelationship
+
+
+class EvidenceLedgerCreate(BaseModel):
+    kind: LedgerKind
+    amount_decimal: str = Field(min_length=1, max_length=40)
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    occurred_on: date
+    category: str = Field(min_length=1, max_length=100)
+    reference: str = Field(min_length=1, max_length=160)
+    business_id: str | None = Field(default=None, max_length=100)
+    marketing: bool = False
+    reversal_of: str | None = Field(default=None, max_length=100)
+
+    @field_validator("currency", mode="before")
+    @classmethod
+    def normalize_ledger_currency(cls, value: object) -> object:
+        return value.strip().upper() if isinstance(value, str) else value
+
+
+class EvidenceLedgerEntry(BaseModel):
+    id: str
+    kind: LedgerKind
+    amount_minor: int
+    currency: str
+    occurred_on: date
+    category: str
+    reference: str
+    business_id: str | None
+    marketing: bool
+    reversal_of: str | None
+    created_by: str
+    created_at: datetime
+
+
+class AdminImpactResponse(BaseModel):
+    paying_businesses: int
+    related_paying_businesses: int
+    real_businesses: int
+    demo_businesses: int
+    unclassified_businesses: int
+    revenue_by_currency: dict[str, int]
+    related_revenue_by_currency: dict[str, int]
+    expenses_by_currency: dict[str, int]
+    marketing_spend_by_currency: dict[str, int]
+    operational: MetricsResponse
+
+
+class RecheckResult(BaseModel):
+    claimed: int
+    evaluated: int
+    succeeded: int
+    failed: int
 
 
 class ErrorDetail(BaseModel):

@@ -72,6 +72,46 @@ class TestDecisionAdapter:
         )
 
 
+class TestTokenCipher:
+    __test__ = False
+    key_name = "test-key"
+
+    def encrypt(self, plaintext: str) -> str:
+        return f"encrypted:{plaintext}"
+
+    def decrypt(self, ciphertext: str) -> str:
+        return ciphertext.removeprefix("encrypted:")
+
+
+class TestGmailAdapter:
+    __test__ = False
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str, str]] = []
+
+    def new_pkce_verifier(self) -> str:
+        return "v" * 64
+
+    def authorization_url(self, state: str, code_verifier: str) -> str:
+        return f"https://accounts.example/authorize?state={state}&challenge={len(code_verifier)}"
+
+    def exchange_code(self, code: str, code_verifier: str) -> str:
+        return f"refresh-{code}-{len(code_verifier)}"
+
+    def send(self, refresh_token: str, recipient: str, subject: str, body: str) -> str:
+        self.sent.append((recipient, subject, body))
+        return f"gmail-{len(self.sent)}"
+
+
+class TestSchedulerVerifier:
+    __test__ = False
+
+    def verify(self, authorization: str | None) -> str:
+        if authorization != "Bearer scheduler-token":
+            raise ApiError(401, "invalid_scheduler_token", "Scheduler authentication failed.")
+        return "scheduler@example.test"
+
+
 @pytest.fixture
 def repository() -> InMemoryRepository:
     return InMemoryRepository()
@@ -83,6 +123,7 @@ def client(repository: InMemoryRepository) -> Iterator[TestClient]:
         app_env="test",
         gcp_project_id="cashsathi-test",
         cors_allowed_origins="http://localhost:3000",
+        platform_admin_uids="alice",
     )
     app = create_app(
         settings=settings,
@@ -90,6 +131,9 @@ def client(repository: InMemoryRepository) -> Iterator[TestClient]:
         auth_verifier=TestAuthVerifier(),
         invoice_extractor=TestInvoiceExtractor(),
         decision_adapter=TestDecisionAdapter(),
+        gmail_adapter=TestGmailAdapter(),
+        token_cipher=TestTokenCipher(),
+        scheduler_verifier=TestSchedulerVerifier(),
     )
     with TestClient(app, raise_server_exceptions=False) as test_client:
         yield test_client

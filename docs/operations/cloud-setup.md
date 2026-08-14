@@ -15,7 +15,17 @@ Before creating App Engine or location-dependent resources, create the default F
 
 The bootstrap enables Cloud Run, Artifact Registry, Cloud Build, Firestore, Firebase, Secret Manager, Cloud KMS, and Billing Budgets; creates dedicated web/API identities; applies least privilege; creates empty future-secret containers; creates a USD 10 budget with 50/90/100% alerts; and deploys deny-all Firestore client rules.
 
-Before deploying Phase 2, add a Gemini API key version with `gcloud secrets versions add gemini-api-key --data-file=-`. The bootstrap grants only the API service account access to this secret; the deploy script mounts it as `GEMINI_API_KEY`.
+Before deployment, add secret versions for `gemini-api-key`, `gmail-oauth-client-id`, and `gmail-oauth-client-secret`. The bootstrap grants only the API service account access and creates the KMS key used for Gmail refresh tokens.
+
+## Gmail OAuth and scheduler
+
+1. Configure the Google Auth Platform consent screen and a Web application OAuth client.
+2. Request only `https://www.googleapis.com/auth/gmail.send`; add test users while the app remains in testing mode.
+3. Deploy once, then add `<api-url>/api/integrations/gmail/callback` as an exact authorized redirect URI and redeploy.
+4. Pass the Firebase UIDs allowed to view company-wide evidence with `-PlatformAdminUids`; leave it empty when no administrator should exist.
+5. Confirm the `cashsathi-hourly-recheck` Scheduler job uses the dedicated scheduler identity, the API service URL as its OIDC audience, and an hourly Asia/Kolkata schedule.
+
+Existing databases should run `uv run python scripts/backfill_phase_4.py --project <id>` first as a dry run, then repeat with `--apply`. The backfill never sends email and defaults existing businesses to `UNCLASSIFIED`.
 
 ## Firebase console steps
 
@@ -41,6 +51,9 @@ Both services use min instances `0` and max instances `3`. The PDF-processing AP
 7. Confirm Cloud Logging has structured request records without authorization headers or personal invoice content.
 8. Confirm another user receives a distinct business ID.
 9. Accept product-processing consent, upload a redacted PDF, confirm it, and evaluate it.
-10. Confirm Firestore and Cloud Logging contain no PDF bytes, filenames, customer email, prompt, or raw Gemini response.
+10. Connect a dedicated Gmail test mailbox, keep automation off, approve one reminder, and confirm one provider message ID and one received message.
+11. Enable automation explicitly, invoke the scheduler twice, and confirm the deterministic action key prevents duplicate delivery.
+12. Record partial and final payments; confirm the invoice closes only at the verified face value.
+13. Confirm Firestore and Cloud Logging contain no raw PDF, OAuth token, full prompt, email body, or raw Gmail/Gemini response.
 
 Deployment is not complete until these checks and Firebase authorized-domain configuration pass.

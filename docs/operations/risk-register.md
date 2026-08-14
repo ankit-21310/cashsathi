@@ -9,6 +9,6 @@
 | Budget overrun | USD 10-equivalent budget alerts, min instances zero, max instances three | Cloud owner, pending deployment |
 | Fake or overstated traction | Separate demo, related-party, and arms-length records; conservative metric definitions | Founder, active |
 | Invoice privacy exposure | Transient document processing and sanitized logs | Engineering, Phase 2 enforcement pending |
-| Aggressive collection action | Cooldown, approval threshold, disputes and legal language hard stops | Engineering, Phase 3 enforcement pending |
+| Aggressive collection action | Cooldown, approval threshold, disputes and legal language hard stops | Engineering, enforced in decision and execution workflows |
 | Delivery ambiguity causes duplicate reminder | Deterministic action keys and `UNKNOWN` state | Engineering, Phase 4 pending |
 | Deadline leaves no deployed Gemini loop | Phase 0/1 explicitly marked insufficient; Phase 2–4 remain critical path | Founder, open |

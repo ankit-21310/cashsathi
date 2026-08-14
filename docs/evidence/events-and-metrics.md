@@ -31,8 +31,14 @@ Required event types:
 - `action.proposed`
 - `action.approved`
 - `action.executed`
+- `action.cancelled`
+- `action.resolved`
 - `payment.recorded`
 - `invoice.closed`
+- `gmail.connected`
+- `gmail.disconnected`
+- `automation.changed`
+- `evidence.ledger_recorded`
 
 Properties contain sanitized operational facts, never bearer tokens, OAuth tokens, raw PDFs, full model prompts, or email bodies. Events are immutable through public APIs.
 

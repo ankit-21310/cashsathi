@@ -11,14 +11,14 @@ if (-not (Get-Command gcloud -ErrorAction SilentlyContinue)) {
 }
 
 gcloud config set project $ProjectId
-gcloud services enable run.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com firestore.googleapis.com firebase.googleapis.com secretmanager.googleapis.com cloudkms.googleapis.com billingbudgets.googleapis.com generativelanguage.googleapis.com
+gcloud services enable run.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com firestore.googleapis.com firebase.googleapis.com secretmanager.googleapis.com cloudkms.googleapis.com cloudscheduler.googleapis.com gmail.googleapis.com billingbudgets.googleapis.com generativelanguage.googleapis.com
 
 $repository = gcloud artifacts repositories describe cashsathi --location $Region --format "value(name)" 2>$null
 if (-not $repository) {
   gcloud artifacts repositories create cashsathi --repository-format docker --location $Region --description "CashSathi service images"
 }
 
-foreach ($service in @("cashsathi-api", "cashsathi-web")) {
+foreach ($service in @("cashsathi-api", "cashsathi-web", "cashsathi-scheduler")) {
   $email = "$service@$ProjectId.iam.gserviceaccount.com"
   $existing = gcloud iam service-accounts describe $email --format "value(email)" 2>$null
   if (-not $existing) {
@@ -29,7 +29,6 @@ foreach ($service in @("cashsathi-api", "cashsathi-web")) {
 $apiAccount = "cashsathi-api@$ProjectId.iam.gserviceaccount.com"
 gcloud projects add-iam-policy-binding $ProjectId --member "serviceAccount:$apiAccount" --role roles/datastore.user --condition None
 gcloud projects add-iam-policy-binding $ProjectId --member "serviceAccount:$apiAccount" --role roles/logging.logWriter --condition None
-gcloud secrets add-iam-policy-binding gemini-api-key --member "serviceAccount:$apiAccount" --role roles/secretmanager.secretAccessor
 
 $webAccount = "cashsathi-web@$ProjectId.iam.gserviceaccount.com"
 gcloud projects add-iam-policy-binding $ProjectId --member "serviceAccount:$webAccount" --role roles/logging.logWriter --condition None
@@ -39,7 +38,18 @@ foreach ($secret in @("gemini-api-key", "gmail-oauth-client-id", "gmail-oauth-cl
   if (-not $existing) {
     gcloud secrets create $secret --replication-policy automatic
   }
+  gcloud secrets add-iam-policy-binding $secret --member "serviceAccount:$apiAccount" --role roles/secretmanager.secretAccessor
 }
+
+$keyRing = gcloud kms keyrings describe cashsathi --location $Region --format "value(name)" 2>$null
+if (-not $keyRing) {
+  gcloud kms keyrings create cashsathi --location $Region
+}
+$cryptoKey = gcloud kms keys describe gmail-oauth-tokens --keyring cashsathi --location $Region --format "value(name)" 2>$null
+if (-not $cryptoKey) {
+  gcloud kms keys create gmail-oauth-tokens --keyring cashsathi --location $Region --purpose encryption
+}
+gcloud kms keys add-iam-policy-binding gmail-oauth-tokens --keyring cashsathi --location $Region --member "serviceAccount:$apiAccount" --role roles/cloudkms.cryptoKeyEncrypterDecrypter
 
 $database = gcloud firestore databases describe --database "(default)" --format "value(name)" 2>$null
 if (-not $database) {

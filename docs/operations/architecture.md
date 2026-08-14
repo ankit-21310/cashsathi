@@ -39,11 +39,15 @@ Exact transitive versions are recorded in `package-lock.json` and `services/api/
 - `businesses/{businessId}/agent_runs/{runId}`: validated proposals and policy outcomes.
 - `businesses/{businessId}/actions/{actionId}`: proposed or approval-gated external actions.
 
-## Phase 2–3 operating boundary
+## Phase 2–5 operating boundary
 
 The API validates PDF uploads to 10 MiB and 25 pages, sends bytes inline to Gemini, returns an editable draft, and discards the bytes. Confirmation uses the immutable extraction event as provenance and as the idempotency key. Date-derived invoice state is calculated at read/evaluation time in Asia/Kolkata rather than stored as stale state.
 
-Gemini only proposes a structured decision. Deterministic code applies paid, dispute, missing-data, cooldown, high-value, non-INR, manual-only, legal-language, and missing-email safeguards before an append-oriented agent run or action proposal is stored. Phase 3 never executes an external action.
+Gemini only proposes a structured decision and bounded reminder tone/intent. Deterministic code applies paid, dispute, missing-data, cooldown, high-value, non-INR, manual-only, legal-language, automation, classification, and missing-email safeguards. Policy-owned templates render the final reminder.
+
+Gmail uses OAuth Authorization Code with PKCE and only `gmail.send`; refresh tokens are encrypted with Cloud KMS. An action is transactionally reserved before delivery. Definite failures can be explicitly retried, while ambiguous or stale executions become `UNKNOWN` and require owner verification. Cloud Scheduler invokes the shared workflow hourly with Google OIDC and transactional invoice leases.
+
+Payment records are immutable and owner-confirmed. Metrics remain separated by currency, and product revenue/expense evidence is stored in an admin-only append ledger distinct from customer receivables.
 
 ## Consequences
 

@@ -1,61 +1,90 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 from uuid import uuid4
 
 import structlog
-from fastapi import Depends, FastAPI, File, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Header, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 
 from cashsathi_api.auth import AuthVerifier, FirebaseAuthVerifier, authenticated_user
 from cashsathi_api.config import Settings, get_settings
 from cashsathi_api.decisioning import (
     DecisionAdapter,
-    DecisionSchemaFailure,
-    DecisionTransportFailure,
     DecisionUnavailableError,
     GeminiDecisionAdapter,
 )
 from cashsathi_api.domain import (
     Action,
+    ActionCancel,
+    ActionPage,
+    ActionResolve,
     ActionState,
-    AgentDecision,
-    AgentRun,
+    AdminImpactResponse,
     AgentRunPage,
-    AgentRunStatus,
     AuthenticatedUser,
+    AutomationUpdate,
     Business,
+    BusinessClassificationUpdate,
     BusinessCreate,
     ConsentAccept,
     ConsentStatus,
     CustomerSnapshot,
     ErrorEnvelope,
     EvaluationResult,
+    EvidenceLedgerCreate,
+    EvidenceLedgerEntry,
     ExtractionResult,
+    GmailConnection,
+    GmailConnectResponse,
+    GmailOAuthState,
+    GmailStatus,
     HealthResponse,
     Invoice,
     InvoiceConfirm,
     InvoiceDetail,
     InvoicePage,
     InvoiceSummary,
+    InvoiceTimeline,
+    InvoiceWorkflowStatus,
     MeResponse,
-    ModelDecision,
-    PolicyOutcome,
-    PolicyResult,
+    MetricsResponse,
+    Payment,
+    PaymentCreate,
+    PolicyDefaults,
+    RecheckResult,
     TenantContext,
+)
+from cashsathi_api.emulator_adapters import (
+    EmulatorDecisionAdapter,
+    EmulatorGmailAdapter,
+    EmulatorInvoiceExtractor,
+    EmulatorTokenCipher,
 )
 from cashsathi_api.errors import (
     ApiError,
     api_error_handler,
     unhandled_error_handler,
     validation_error_handler,
+)
+from cashsathi_api.evidence import admin_impact, build_timeline, calculate_metrics
+from cashsathi_api.gmail import (
+    GmailAdapter,
+    GmailDefiniteFailure,
+    GmailUnavailableError,
+    GoogleGmailAdapter,
+    GoogleKmsTokenCipher,
+    TokenCipher,
 )
 from cashsathi_api.invoice_processing import (
     ExtractionUnavailableError,
@@ -65,9 +94,10 @@ from cashsathi_api.invoice_processing import (
 )
 from cashsathi_api.money import decimal_to_minor
 from cashsathi_api.observability import RequestContextMiddleware, configure_logging
-from cashsathi_api.policy import evaluate_policy
 from cashsathi_api.repository import FirestoreRepository, Repository
+from cashsathi_api.scheduler_auth import GoogleSchedulerVerifier, SchedulerVerifier
 from cashsathi_api.state_engine import calculate_invoice_state
+from cashsathi_api.workflow import CollectionWorkflow, initial_next_check
 
 PRODUCT_CONSENT_VERSION = "2026-08-14.v1"
 PRODUCT_CONSENT_STATEMENT = (
@@ -85,6 +115,24 @@ def repository_from(request: Request) -> Repository:
 
 RepositoryDependency = Annotated[Repository, Depends(repository_from)]
 UserDependency = Annotated[AuthenticatedUser, Depends(authenticated_user)]
+
+
+def workflow_from(request: Request) -> CollectionWorkflow:
+    adapter: DecisionAdapter | None = request.app.state.decision_adapter
+    if adapter is None:
+        raise ApiError(503, "gemini_not_configured", "Agent decisioning is not configured.")
+    return CollectionWorkflow(
+        repository=request.app.state.repository,
+        decision_adapter=adapter,
+        settings=request.app.state.settings,
+        gmail_adapter=request.app.state.gmail_adapter,
+        token_cipher=request.app.state.token_cipher,
+    )
+
+
+def require_admin(user: AuthenticatedUser, settings: Settings) -> None:
+    if user.uid not in settings.admin_uids:
+        raise ApiError(403, "admin_required", "Platform administrator access is required.")
 
 
 def _invoice_id(extraction_id: str) -> str:
@@ -126,6 +174,9 @@ def create_app(
     auth_verifier: AuthVerifier | None = None,
     invoice_extractor: InvoiceExtractor | None = None,
     decision_adapter: DecisionAdapter | None = None,
+    gmail_adapter: GmailAdapter | None = None,
+    token_cipher: TokenCipher | None = None,
+    scheduler_verifier: SchedulerVerifier | None = None,
 ) -> FastAPI:
     runtime_settings = settings or get_settings()
     configure_logging(runtime_settings)
@@ -136,6 +187,8 @@ def create_app(
         application.state.auth_verifier = auth_verifier or FirebaseAuthVerifier(runtime_settings)
         if invoice_extractor is not None:
             application.state.invoice_extractor = invoice_extractor
+        elif runtime_settings.local_emulators_enabled:
+            application.state.invoice_extractor = EmulatorInvoiceExtractor()
         else:
             try:
                 application.state.invoice_extractor = GeminiInvoiceExtractor(runtime_settings)
@@ -143,11 +196,34 @@ def create_app(
                 application.state.invoice_extractor = None
         if decision_adapter is not None:
             application.state.decision_adapter = decision_adapter
+        elif runtime_settings.local_emulators_enabled:
+            application.state.decision_adapter = EmulatorDecisionAdapter()
         else:
             try:
                 application.state.decision_adapter = GeminiDecisionAdapter(runtime_settings)
             except DecisionUnavailableError:
                 application.state.decision_adapter = None
+        if gmail_adapter is not None:
+            application.state.gmail_adapter = gmail_adapter
+        elif runtime_settings.local_emulators_enabled:
+            application.state.gmail_adapter = EmulatorGmailAdapter(runtime_settings)
+        else:
+            try:
+                application.state.gmail_adapter = GoogleGmailAdapter(runtime_settings)
+            except GmailUnavailableError:
+                application.state.gmail_adapter = None
+        if token_cipher is not None:
+            application.state.token_cipher = token_cipher
+        elif runtime_settings.local_emulators_enabled:
+            application.state.token_cipher = EmulatorTokenCipher()
+        else:
+            try:
+                application.state.token_cipher = GoogleKmsTokenCipher(runtime_settings)
+            except GmailUnavailableError:
+                application.state.token_cipher = None
+        application.state.scheduler_verifier = scheduler_verifier or GoogleSchedulerVerifier(
+            runtime_settings
+        )
         yield
 
     application = FastAPI(
@@ -345,6 +421,16 @@ def create_app(
             created_at=now,
             updated_at=now,
         )
+        invoice = invoice.model_copy(
+            update={
+                "next_check_at": initial_next_check(invoice, now),
+                "workflow_status": (
+                    InvoiceWorkflowStatus.PAUSED
+                    if invoice.review_required
+                    else InvoiceWorkflowStatus.OPEN
+                ),
+            }
+        )
         return repo.save_invoice(tenant, invoice)
 
     @application.get("/api/invoices", response_model=InvoicePage, tags=["invoices"])
@@ -388,110 +474,7 @@ def create_app(
         repo: RepositoryDependency,
     ) -> EvaluationResult:
         tenant = repo.require_tenant(user)
-        invoice = repo.get_invoice(tenant, invoice_id)
-        actions = repo.list_actions(tenant, invoice.id)
-        state = calculate_invoice_state(invoice, actions)
-        adapter: DecisionAdapter | None = request.app.state.decision_adapter
-        if adapter is None:
-            raise ApiError(503, "gemini_not_configured", "Agent decisioning is not configured.")
-        run_id = f"run_{uuid4().hex}"
-        created_at = datetime.now(UTC)
-        try:
-            output = await run_in_threadpool(adapter.decide, invoice, state, actions)
-        except DecisionSchemaFailure as failure:
-            proposal = ModelDecision(
-                decision=AgentDecision.REQUEST_HUMAN_REVIEW,
-                rationale="Gemini returned invalid structured output twice.",
-                risk_flags=["INVALID_MODEL_OUTPUT"],
-                requires_human_approval=True,
-            )
-            policy_result = PolicyResult(
-                outcome=PolicyOutcome.BLOCK,
-                final_decision=AgentDecision.REQUEST_HUMAN_REVIEW,
-                matched_rules=["invalid_model_output"],
-                requires_approval=True,
-                next_check_at=None,
-                policy_version=runtime_settings.policy_version,
-            )
-            run = AgentRun(
-                id=run_id,
-                invoice_id=invoice.id,
-                business_id=tenant.business_id,
-                status=AgentRunStatus.HUMAN_REVIEW,
-                invoice_state=state,
-                model_proposal=proposal,
-                policy_result=policy_result,
-                model_id=adapter.model_id,
-                prompt_version=adapter.prompt_version,
-                attempt_count=failure.attempt_count,
-                latency_ms=failure.latency_ms,
-                failure_code="invalid_model_output",
-                created_at=created_at,
-            )
-            repo.save_evaluation(tenant, run, None)
-            return EvaluationResult(agent_run=run, action=None)
-        except DecisionTransportFailure as failure:
-            run = AgentRun(
-                id=run_id,
-                invoice_id=invoice.id,
-                business_id=tenant.business_id,
-                status=AgentRunStatus.FAILED,
-                invoice_state=state,
-                model_proposal=None,
-                policy_result=None,
-                model_id=adapter.model_id,
-                prompt_version=adapter.prompt_version,
-                attempt_count=1,
-                latency_ms=failure.latency_ms,
-                failure_code="model_transport_failure",
-                created_at=created_at,
-            )
-            repo.save_evaluation(tenant, run, None)
-            raise ApiError(
-                503,
-                "decision_unavailable",
-                "Agent decisioning is temporarily unavailable. No action was created.",
-            ) from None
-
-        policy_result = evaluate_policy(
-            invoice=invoice,
-            invoice_state=state,
-            proposal=output.proposal,
-            settings=repo.get_policy_settings(tenant),
-            actions=actions,
-            policy_version=runtime_settings.policy_version,
-        )
-        action = None
-        if policy_result.final_decision == AgentDecision.SEND_REMINDER:
-            action = Action(
-                id=f"act_{uuid4().hex}",
-                invoice_id=invoice.id,
-                agent_run_id=run_id,
-                state=(
-                    ActionState.AWAITING_APPROVAL
-                    if policy_result.requires_approval
-                    else ActionState.PROPOSED
-                ),
-                created_at=created_at,
-            )
-        run = AgentRun(
-            id=run_id,
-            invoice_id=invoice.id,
-            business_id=tenant.business_id,
-            status=AgentRunStatus.SUCCEEDED,
-            invoice_state=state,
-            model_proposal=output.proposal,
-            policy_result=policy_result,
-            model_id=adapter.model_id,
-            prompt_version=adapter.prompt_version,
-            attempt_count=output.attempt_count,
-            latency_ms=output.latency_ms,
-            input_tokens=output.input_tokens,
-            output_tokens=output.output_tokens,
-            created_at=created_at,
-        )
-        repo.save_evaluation(tenant, run, action)
-        return EvaluationResult(agent_run=run, action=action)
+        return await workflow_from(request).evaluate(tenant, invoice_id)
 
     @application.get("/api/agent-runs", response_model=AgentRunPage, tags=["agent"])
     def list_agent_runs(
@@ -504,6 +487,319 @@ def create_app(
         tenant = repo.require_tenant(user)
         runs, next_cursor = repo.list_agent_runs(tenant, invoice_id, limit, cursor)
         return AgentRunPage(items=runs, next_cursor=next_cursor)
+
+    @application.get("/api/actions", response_model=ActionPage, tags=["actions"])
+    def list_actions(
+        user: UserDependency,
+        repo: RepositoryDependency,
+        state: Annotated[ActionState | None, Query()] = None,
+        limit: Annotated[int, Query(ge=1, le=100)] = 25,
+        cursor: Annotated[str | None, Query(max_length=300)] = None,
+    ) -> ActionPage:
+        tenant = repo.require_tenant(user)
+        actions, next_cursor = repo.list_all_actions(tenant, state, limit, cursor)
+        return ActionPage(items=actions, next_cursor=next_cursor)
+
+    @application.post("/api/actions/{action_id}/approve", response_model=Action, tags=["actions"])
+    async def approve_action(
+        action_id: str, request: Request, user: UserDependency, repo: RepositoryDependency
+    ) -> Action:
+        return await workflow_from(request).approve(repo.require_tenant(user), action_id)
+
+    @application.post("/api/actions/{action_id}/cancel", response_model=Action, tags=["actions"])
+    def cancel_action(
+        action_id: str,
+        payload: ActionCancel,
+        request: Request,
+        user: UserDependency,
+        repo: RepositoryDependency,
+    ) -> Action:
+        return workflow_from(request).cancel(repo.require_tenant(user), action_id, payload)
+
+    @application.post("/api/actions/{action_id}/retry", response_model=Action, tags=["actions"])
+    async def retry_action(
+        action_id: str, request: Request, user: UserDependency, repo: RepositoryDependency
+    ) -> Action:
+        return await workflow_from(request).retry(repo.require_tenant(user), action_id)
+
+    @application.post("/api/actions/{action_id}/resolve", response_model=Action, tags=["actions"])
+    def resolve_action(
+        action_id: str,
+        payload: ActionResolve,
+        request: Request,
+        user: UserDependency,
+        repo: RepositoryDependency,
+    ) -> Action:
+        return workflow_from(request).resolve(repo.require_tenant(user), action_id, payload)
+
+    @application.post(
+        "/api/invoices/{invoice_id}/payments", response_model=Payment, tags=["payments"]
+    )
+    def record_payment(
+        invoice_id: str,
+        payload: PaymentCreate,
+        user: UserDependency,
+        repo: RepositoryDependency,
+    ) -> Payment:
+        tenant = repo.require_tenant(user)
+        invoice = repo.get_invoice(tenant, invoice_id)
+        if payload.currency != invoice.currency:
+            raise ApiError(
+                422, "payment_currency_mismatch", "Payment currency must match the invoice."
+            )
+        now = datetime.now(UTC)
+        if payload.paid_at > now + timedelta(minutes=5):
+            raise ApiError(422, "payment_date_in_future", "Payment time cannot be in the future.")
+        amount_minor = decimal_to_minor(payload.amount_decimal, payload.currency)
+        raw_id = f"{tenant.business_id}:{invoice_id}:{payload.idempotency_key}"
+        payment = Payment(
+            id=f"pay_{hashlib.sha256(raw_id.encode()).hexdigest()[:28]}",
+            invoice_id=invoice_id,
+            business_id=tenant.business_id,
+            amount_minor=amount_minor,
+            currency=payload.currency,
+            paid_at=payload.paid_at,
+            reference=payload.reference.strip(),
+            idempotency_key=payload.idempotency_key,
+            confirmed_by=tenant.user_id,
+            created_at=now,
+        )
+        stored, _invoice = repo.record_payment(tenant, payment)
+        return stored
+
+    @application.get(
+        "/api/invoices/{invoice_id}/timeline", response_model=InvoiceTimeline, tags=["evidence"]
+    )
+    def invoice_timeline(
+        invoice_id: str, user: UserDependency, repo: RepositoryDependency
+    ) -> InvoiceTimeline:
+        return build_timeline(repo, repo.require_tenant(user), invoice_id)
+
+    @application.get("/api/metrics", response_model=MetricsResponse, tags=["metrics"])
+    def metrics(user: UserDependency, repo: RepositoryDependency) -> MetricsResponse:
+        return calculate_metrics(repo, repo.require_tenant(user))
+
+    @application.get("/api/settings/automation", response_model=PolicyDefaults, tags=["settings"])
+    def automation_settings(user: UserDependency, repo: RepositoryDependency) -> PolicyDefaults:
+        return repo.get_policy_settings(repo.require_tenant(user))
+
+    @application.post("/api/settings/automation", response_model=PolicyDefaults, tags=["settings"])
+    def update_automation(
+        payload: AutomationUpdate, user: UserDependency, repo: RepositoryDependency
+    ) -> PolicyDefaults:
+        return repo.update_automation(repo.require_tenant(user), payload.enabled)
+
+    @application.get(
+        "/api/integrations/gmail/status", response_model=GmailStatus, tags=["integrations"]
+    )
+    def gmail_status(user: UserDependency, repo: RepositoryDependency) -> GmailStatus:
+        tenant = repo.require_tenant(user)
+        connection = repo.get_gmail_connection(tenant.business_id)
+        settings = repo.get_policy_settings(tenant)
+        connected = bool(
+            connection and connection.disconnected_at is None and connection.encrypted_refresh_token
+        )
+        return GmailStatus(
+            connected=connected,
+            connected_at=connection.connected_at if connected and connection else None,
+            last_error_code=connection.last_error_code if connection else None,
+            automation_enabled=settings.automation_enabled,
+        )
+
+    @application.post(
+        "/api/integrations/gmail/connect",
+        response_model=GmailConnectResponse,
+        tags=["integrations"],
+    )
+    def connect_gmail(
+        request: Request, user: UserDependency, repo: RepositoryDependency
+    ) -> GmailConnectResponse:
+        tenant = repo.require_tenant(user)
+        adapter: GmailAdapter | None = request.app.state.gmail_adapter
+        if adapter is None or request.app.state.token_cipher is None:
+            raise ApiError(503, "gmail_not_configured", "Gmail integration is not configured.")
+        state_value = secrets.token_urlsafe(32)
+        verifier = adapter.new_pkce_verifier()
+        now = datetime.now(UTC)
+        repo.create_oauth_state(
+            tenant,
+            GmailOAuthState(
+                state=state_value,
+                business_id=tenant.business_id,
+                user_id=tenant.user_id,
+                code_verifier=verifier,
+                expires_at=now + timedelta(minutes=10),
+                created_at=now,
+            ),
+        )
+        return GmailConnectResponse(
+            authorization_url=adapter.authorization_url(state_value, verifier)
+        )
+
+    @application.get("/api/integrations/gmail/callback", tags=["integrations"])
+    async def gmail_callback(
+        request: Request,
+        state: Annotated[str, Query(min_length=20, max_length=200)],
+        code: Annotated[str | None, Query(max_length=4096)] = None,
+        error: Annotated[str | None, Query(max_length=200)] = None,
+    ) -> RedirectResponse:
+        callback_repo: Repository = request.app.state.repository
+        oauth_state = callback_repo.consume_oauth_state(state)
+        target = runtime_settings.web_base_url.rstrip("/") + "/integrations/gmail"
+        if error or not code:
+            return RedirectResponse(f"{target}?status=cancelled", status_code=303)
+        adapter: GmailAdapter | None = request.app.state.gmail_adapter
+        cipher: TokenCipher | None = request.app.state.token_cipher
+        if adapter is None or cipher is None:
+            return RedirectResponse(f"{target}?status=not-configured", status_code=303)
+        try:
+            refresh_token = await run_in_threadpool(
+                adapter.exchange_code, code, oauth_state.code_verifier
+            )
+            encrypted = await run_in_threadpool(cipher.encrypt, refresh_token)
+        except (GmailDefiniteFailure, GmailUnavailableError):
+            return RedirectResponse(f"{target}?status=failed", status_code=303)
+        now = datetime.now(UTC)
+        tenant = callback_repo.require_tenant(AuthenticatedUser(oauth_state.user_id, None, None))
+        if tenant.business_id != oauth_state.business_id:
+            raise ApiError(400, "oauth_tenant_mismatch", "The Gmail connection tenant changed.")
+        callback_repo.save_gmail_connection(
+            tenant,
+            GmailConnection(
+                business_id=tenant.business_id,
+                encrypted_refresh_token=encrypted,
+                kms_key_name=cipher.key_name,
+                connected_at=now,
+                updated_at=now,
+            ),
+        )
+        return RedirectResponse(f"{target}?status=connected", status_code=303)
+
+    @application.post("/api/integrations/gmail/disconnect", tags=["integrations"])
+    def disconnect_gmail(user: UserDependency, repo: RepositoryDependency) -> GmailStatus:
+        tenant = repo.require_tenant(user)
+        repo.disconnect_gmail(tenant)
+        repo.update_automation(tenant, False)
+        return GmailStatus(connected=False, automation_enabled=False)
+
+    @application.post("/api/jobs/recheck", response_model=RecheckResult, tags=["jobs"])
+    async def recheck_due_invoices(
+        request: Request,
+        repo: RepositoryDependency,
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> RecheckResult:
+        verifier: SchedulerVerifier = request.app.state.scheduler_verifier
+        verifier.verify(authorization)
+        workflow = workflow_from(request)
+        workflow.reconcile_stale_actions()
+        claimed = repo.claim_due_invoices(
+            datetime.now(UTC), runtime_settings.scheduler_batch_size, 10
+        )
+        semaphore = asyncio.Semaphore(runtime_settings.scheduler_concurrency)
+
+        async def run_one(tenant: TenantContext, invoice: Invoice) -> bool:
+            async with semaphore:
+                try:
+                    await workflow.evaluate(tenant, invoice.id)
+                    return True
+                except Exception:
+                    structlog.get_logger("scheduler").exception(
+                        "scheduled_evaluation_failed", invoice_id=invoice.id
+                    )
+                    return False
+
+        results = await asyncio.gather(*(run_one(tenant, invoice) for tenant, invoice in claimed))
+        succeeded = sum(1 for result in results if result)
+        return RecheckResult(
+            claimed=len(claimed),
+            evaluated=len(results),
+            succeeded=succeeded,
+            failed=len(results) - succeeded,
+        )
+
+    @application.get("/api/admin/businesses", response_model=list[Business], tags=["admin"])
+    def admin_businesses(user: UserDependency, repo: RepositoryDependency) -> list[Business]:
+        require_admin(user, runtime_settings)
+        return repo.list_businesses()
+
+    @application.post(
+        "/api/admin/businesses/{business_id}/classification",
+        response_model=Business,
+        tags=["admin"],
+    )
+    def classify_business(
+        business_id: str,
+        payload: BusinessClassificationUpdate,
+        user: UserDependency,
+        repo: RepositoryDependency,
+    ) -> Business:
+        require_admin(user, runtime_settings)
+        return repo.classify_business(
+            business_id, payload.data_classification, payload.relationship
+        )
+
+    @application.get(
+        "/api/admin/evidence-ledger", response_model=list[EvidenceLedgerEntry], tags=["admin"]
+    )
+    def evidence_ledger(
+        user: UserDependency, repo: RepositoryDependency
+    ) -> list[EvidenceLedgerEntry]:
+        require_admin(user, runtime_settings)
+        return repo.list_ledger_entries()
+
+    @application.post(
+        "/api/admin/evidence-ledger", response_model=EvidenceLedgerEntry, tags=["admin"]
+    )
+    def create_evidence_ledger_entry(
+        payload: EvidenceLedgerCreate,
+        user: UserDependency,
+        repo: RepositoryDependency,
+    ) -> EvidenceLedgerEntry:
+        require_admin(user, runtime_settings)
+        if payload.kind.value == "PRODUCT_REVENUE" and not payload.business_id:
+            raise ApiError(422, "revenue_business_required", "Revenue must link to a business.")
+        if payload.business_id:
+            repo.get_business_by_id(payload.business_id)
+        amount_minor = decimal_to_minor(payload.amount_decimal, payload.currency)
+        if payload.reversal_of:
+            original = next(
+                (entry for entry in repo.list_ledger_entries() if entry.id == payload.reversal_of),
+                None,
+            )
+            if original is None:
+                raise ApiError(
+                    422, "reversal_not_found", "The original ledger entry was not found."
+                )
+            if any(entry.reversal_of == original.id for entry in repo.list_ledger_entries()):
+                raise ApiError(409, "already_reversed", "The ledger entry is already reversed.")
+            if (
+                original.kind != payload.kind
+                or original.currency != payload.currency
+                or original.amount_minor != amount_minor
+            ):
+                raise ApiError(
+                    422, "invalid_reversal", "A reversal must exactly match the original."
+                )
+        entry = EvidenceLedgerEntry(
+            id=f"ledger_{uuid4().hex}",
+            kind=payload.kind,
+            amount_minor=amount_minor,
+            currency=payload.currency,
+            occurred_on=payload.occurred_on,
+            category=payload.category,
+            reference=payload.reference,
+            business_id=payload.business_id,
+            marketing=payload.marketing,
+            reversal_of=payload.reversal_of,
+            created_by=user.uid,
+            created_at=datetime.now(UTC),
+        )
+        return repo.create_ledger_entry(entry)
+
+    @application.get("/api/admin/impact", response_model=AdminImpactResponse, tags=["admin"])
+    def platform_impact(user: UserDependency, repo: RepositoryDependency) -> AdminImpactResponse:
+        require_admin(user, runtime_settings)
+        return admin_impact(repo)
 
     return application
 

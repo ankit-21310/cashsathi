@@ -100,7 +100,9 @@ def evaluate_policy(
             if action.state in {ActionState.SUCCEEDED, ActionState.UNKNOWN}
         ]
         if prior_deliveries:
-            latest = max(action.created_at for action in prior_deliveries)
+            latest = max(
+                action.execution_completed_at or action.created_at for action in prior_deliveries
+            )
             cooldown_end = latest + timedelta(hours=settings.reminder_cooldown_hours)
             if cooldown_end > current:
                 return PolicyResult(

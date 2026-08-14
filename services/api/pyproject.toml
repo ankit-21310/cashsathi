@@ -10,6 +10,9 @@ dependencies = [
   "firebase-admin==7.5.0",
   "google-genai==2.14.0",
   "google-cloud-firestore==2.28.1",
+  "google-cloud-kms==3.6.0",
+  "google-api-python-client==2.179.0",
+  "google-auth-oauthlib==1.2.2",
   "iso4217==1.16.20260101",
   "pydantic==2.13.4",
   "pydantic-settings==2.15.0",
@@ -57,5 +60,13 @@ plugins = ["pydantic.mypy"]
 warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
-module = ["firebase_admin.*", "google.auth.*", "google.cloud.*"]
+module = [
+  "firebase_admin.*",
+  "google.auth.*",
+  "google.oauth2.*",
+  "google.cloud.*",
+  "google_auth_oauthlib.*",
+  "googleapiclient.*",
+]
 ignore_missing_imports = true
+disable_error_code = ["no-untyped-call"]
