@@ -204,8 +204,14 @@ input:focus, select:focus, textarea:focus { border-color: var(--green); box-shad
 .status-dot.connected { background: #37a367; box-shadow: 0 0 0 5px #def1e5; }
 .currency-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
 .admin-grid { display: grid; grid-template-columns: 1.2fr .8fr; gap: 18px; margin-bottom: 20px; }
-.consent-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin: 20px 0; }
-.consent-grid .foundation-panel { display: grid; align-content: start; gap: 12px; }
+.consent-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: stretch; gap: 18px; margin: 20px 0; }
+.consent-card { display: grid; grid-template-rows: auto auto auto 1fr auto; align-content: start; gap: 14px; min-width: 0; padding: 24px; }
+.consent-card h2, .consent-card p { margin: 0; }
+.consent-card h2 { font-size: 1.2rem; line-height: 1.25; }
+.consent-card > p { color: var(--muted); line-height: 1.55; }
+.consent-card label { align-self: end; min-width: 0; }
+.consent-card textarea { min-height: 104px; }
+.consent-card > .button { width: 100%; margin-top: 0; align-self: end; }
 .pricing-panel { display: grid; grid-template-columns: 1.25fr .75fr; gap: 42px; padding: 38px; margin: 30px 0 72px; background: #f2f4ef; border: 1px solid var(--line); border-radius: 24px; }
 .pricing-panel h2 { font-size: 2.4rem; margin: 8px 0; }
 .pricing-panel p { color: var(--muted); line-height: 1.6; }

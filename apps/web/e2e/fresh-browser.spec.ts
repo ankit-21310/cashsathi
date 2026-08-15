@@ -106,4 +106,30 @@ test.describe("fresh browser owner journey", () => {
     const download = await downloadPromise;
     expect(download.suggestedFilename()).toBe("cashsathi-evidence.zip");
   });
+
+  test("keeps privacy consent content inside responsive cards", async ({ page }) => {
+    await page.goto("/login");
+    await page.getByLabel("Email").fill("owner-a@example.test");
+    await page.getByLabel("Password").fill("DemoPass!123");
+    await page.locator("form").getByRole("button", { name: "Sign in", exact: true }).click();
+    await expect(page).toHaveURL(/\/dashboard$/);
+    await page.goto("/privacy");
+
+    const cards = page.locator(".consent-card");
+    await expect(cards).toHaveCount(3);
+    for (let index = 0; index < 3; index += 1) {
+      const cardBox = await cards.nth(index).boundingBox();
+      const labelBox = await cards.nth(index).locator(".eyebrow").boundingBox();
+      expect(cardBox).not.toBeNull();
+      expect(labelBox).not.toBeNull();
+      expect(labelBox!.x - cardBox!.x).toBeGreaterThanOrEqual(20);
+    }
+
+    await page.setViewportSize({ width: 600, height: 900 });
+    await expect(cards.first()).toBeVisible();
+    const fitsViewport = await page.evaluate(
+      () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+    );
+    expect(fitsViewport).toBe(true);
+  });
 });
