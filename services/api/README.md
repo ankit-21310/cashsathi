@@ -8,10 +8,16 @@ Operator utilities default to dry-run:
 
 ```text
 uv run python scripts/backfill_phase_6_7.py --project <id>
+uv run python scripts/backfill_phase_9.py --project <id>
 uv run python scripts/import_validation_prospects.py --project <id> --admin-uid <uid>
 ```
 
 Add `--apply` only after reviewing counts. Neither utility sends messages or changes invoice outcomes.
+
+Phase 9 adds restrictive policy/customer/dispute APIs, explicit Gemini function calls, four
+least-privilege roles, English/Hindi deterministic templates, cash forecasts, and a finance pack.
+The accounting endpoints remain `NOT_CONFIGURED` until owner-approved Zoho Books or outbound
+TallyPrime credentials are provisioned; sync requests fail closed before that point.
 
 Validate the repository-controlled Phase 8 package with `npm run verify:phase8:structure`.
 Final verification requires a fresh admin evidence ZIP and must be run from a clean commit;

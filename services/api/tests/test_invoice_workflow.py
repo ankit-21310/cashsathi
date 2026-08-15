@@ -168,7 +168,7 @@ class InvalidDecisionAdapter:
     model_id = "test-gemini"
     prompt_version = "test-decision-v1"
 
-    def decide(self, _invoice: object, _state: object, _actions: object) -> object:
+    def decide(self, _invoice: object, _state: object, _actions: object, _policy: object) -> object:
         raise DecisionSchemaFailure(2, 40)
 
 
@@ -176,7 +176,7 @@ class TransportFailureAdapter:
     model_id = "test-gemini"
     prompt_version = "test-decision-v1"
 
-    def decide(self, _invoice: object, _state: object, _actions: object) -> object:
+    def decide(self, _invoice: object, _state: object, _actions: object, _policy: object) -> object:
         raise DecisionTransportFailure(45)
 
 

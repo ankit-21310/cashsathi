@@ -23,6 +23,7 @@ from cashsathi_api.domain import (
     BusinessRelationship,
     ConsentEventAction,
     ConsentRecord,
+    CustomerSnapshot,
     DataClassification,
     EvidenceEventType,
     EvidenceLedgerEntry,
@@ -41,6 +42,9 @@ from cashsathi_api.domain import (
     PolicyDefaults,
     Prospect,
     ProspectStatus,
+    ReminderLocale,
+    TeamInvitation,
+    TeamInvitationStatus,
     TenantContext,
 )
 from cashsathi_api.errors import ApiError
@@ -56,6 +60,26 @@ class Repository(Protocol):
     ) -> tuple[Business, Membership]: ...
 
     def require_tenant(self, user: AuthenticatedUser) -> TenantContext: ...
+
+    def create_team_invitation(
+        self, tenant: TenantContext, invitation: TeamInvitation
+    ) -> TeamInvitation: ...
+
+    def list_team_invitations(self, tenant: TenantContext) -> list[TeamInvitation]: ...
+
+    def accept_team_invitation(self, user: AuthenticatedUser, invitation_id: str) -> Membership: ...
+
+    def revoke_team_invitation(
+        self, tenant: TenantContext, invitation_id: str
+    ) -> TeamInvitation: ...
+
+    def list_members(self, tenant: TenantContext) -> list[Membership]: ...
+
+    def update_member_role(
+        self, tenant: TenantContext, user_id: str, role: MembershipRole
+    ) -> Membership: ...
+
+    def revoke_member(self, tenant: TenantContext, user_id: str) -> Membership: ...
 
     def get_consent(self, tenant: TenantContext, version: str) -> ConsentRecord | None: ...
 
@@ -90,11 +114,25 @@ class Repository(Protocol):
 
     def get_policy_settings(self, tenant: TenantContext) -> PolicyDefaults: ...
 
+    def update_policy_settings(
+        self, tenant: TenantContext, settings: PolicyDefaults
+    ) -> PolicyDefaults: ...
+
+    def update_customer_policy(
+        self,
+        tenant: TenantContext,
+        customer_id: str,
+        manual_only: bool | None,
+        locale: ReminderLocale | None,
+    ) -> CustomerSnapshot: ...
+
     def list_actions(self, tenant: TenantContext, invoice_id: str) -> list[Action]: ...
 
     def save_evaluation(
         self, tenant: TenantContext, run: AgentRun, action: Action | None
     ) -> Action | None: ...
+
+    def save_agent_proposal(self, tenant: TenantContext, run: AgentRun) -> None: ...
 
     def list_agent_runs(
         self, tenant: TenantContext, invoice_id: str | None, limit: int, cursor: str | None
@@ -124,6 +162,14 @@ class Repository(Protocol):
     ) -> Action: ...
 
     def update_invoice(self, tenant: TenantContext, invoice: Invoice) -> Invoice: ...
+
+    def update_invoice_with_event(
+        self,
+        tenant: TenantContext,
+        invoice: Invoice,
+        event_type: EvidenceEventType,
+        properties: dict[str, Any],
+    ) -> Invoice: ...
 
     def record_payment(
         self, tenant: TenantContext, payment: Payment
@@ -374,6 +420,239 @@ class FirestoreRepository:
             raise ApiError(403, "membership_inactive", "The business membership is not active.")
         return TenantContext(user_id=user.uid, business_id=business.id, role=membership.role)
 
+    def create_team_invitation(
+        self, tenant: TenantContext, invitation: TeamInvitation
+    ) -> TeamInvitation:
+        for snapshot in (
+            self._client.collection("team_invitations")
+            .where("business_id", "==", tenant.business_id)
+            .stream()
+        ):
+            existing = TeamInvitation.model_validate(snapshot.to_dict())
+            if (
+                str(existing.email).casefold() == str(invitation.email).casefold()
+                and existing.status == TeamInvitationStatus.PENDING
+                and existing.expires_at > datetime.now(UTC)
+            ):
+                raise ApiError(
+                    409,
+                    "invitation_already_pending",
+                    "An active invitation already exists for this email.",
+                )
+        batch = self._client.batch()
+        batch.create(
+            self._client.collection("team_invitations").document(invitation.id),
+            invitation.model_dump(mode="json"),
+        )
+        batch.create(
+            self._client.collection("evidence_events").document(
+                f"evt_team_invited_{invitation.id}"
+            ),
+            _event(
+                event_type=EvidenceEventType.TEAM_INVITATION_CREATED,
+                tenant=tenant,
+                subject_type="team_invitation",
+                subject_id=invitation.id,
+                properties={"role": invitation.role.value},
+            ),
+        )
+        batch.commit()
+        return invitation
+
+    def list_team_invitations(self, tenant: TenantContext) -> list[TeamInvitation]:
+        invitations = [
+            TeamInvitation.model_validate(snapshot.to_dict())
+            for snapshot in self._client.collection("team_invitations")
+            .where("business_id", "==", tenant.business_id)
+            .stream()
+        ]
+        return sorted(invitations, key=lambda item: item.created_at, reverse=True)
+
+    def accept_team_invitation(self, user: AuthenticatedUser, invitation_id: str) -> Membership:
+        invitation_ref = self._client.collection("team_invitations").document(invitation_id)
+        user_ref = self._client.collection("users").document(user.uid)
+        transaction = self._client.transaction()
+
+        @google_firestore.transactional
+        def accept(txn: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+            invitation_snapshot = invitation_ref.get(transaction=txn)
+            if not invitation_snapshot.exists:
+                raise ApiError(404, "invitation_not_found", "The invitation was not found.")
+            invitation = TeamInvitation.model_validate(invitation_snapshot.to_dict())
+            if invitation.status != TeamInvitationStatus.PENDING:
+                raise ApiError(409, "invitation_not_pending", "The invitation is no longer active.")
+            now = datetime.now(UTC)
+            if invitation.expires_at <= now:
+                raise ApiError(409, "invitation_expired", "The invitation has expired.")
+            if user.email is None or user.email.casefold() != str(invitation.email).casefold():
+                raise ApiError(
+                    403,
+                    "invitation_email_mismatch",
+                    "Sign in with the email address that was invited.",
+                )
+            user_snapshot = user_ref.get(transaction=txn)
+            existing_business = (
+                (user_snapshot.to_dict() or {}).get("business_id") if user_snapshot.exists else None
+            )
+            if existing_business and existing_business != invitation.business_id:
+                raise ApiError(
+                    409,
+                    "membership_already_exists",
+                    "This account already belongs to another business.",
+                )
+            membership = Membership(
+                business_id=invitation.business_id,
+                user_id=user.uid,
+                role=invitation.role,
+                status=MembershipStatus.ACTIVE,
+                created_at=now,
+            )
+            member_ref = (
+                self._client.collection("businesses")
+                .document(invitation.business_id)
+                .collection("members")
+                .document(user.uid)
+            )
+            accepted_invitation = invitation.model_copy(
+                update={
+                    "status": TeamInvitationStatus.ACCEPTED,
+                    "accepted_by": user.uid,
+                    "accepted_at": now,
+                }
+            )
+            txn.set(member_ref, membership.model_dump(mode="json"))
+            txn.set(
+                user_ref,
+                {
+                    "email": user.email,
+                    "display_name": user.display_name,
+                    "business_id": invitation.business_id,
+                    "updated_at": now,
+                },
+                merge=True,
+            )
+            txn.set(invitation_ref, accepted_invitation.model_dump(mode="json"))
+            accepted_tenant = TenantContext(user.uid, invitation.business_id, invitation.role)
+            txn.create(
+                self._client.collection("evidence_events").document(
+                    f"evt_team_accepted_{invitation.id}"
+                ),
+                _event(
+                    event_type=EvidenceEventType.TEAM_INVITATION_ACCEPTED,
+                    tenant=accepted_tenant,
+                    subject_type="membership",
+                    subject_id=user.uid,
+                    properties={"role": invitation.role.value},
+                ),
+            )
+            return membership.model_dump(mode="json"), accepted_invitation.model_dump(mode="json")
+
+        membership_data, _invitation_data = accept(transaction)
+        return Membership.model_validate(membership_data)
+
+    def revoke_team_invitation(self, tenant: TenantContext, invitation_id: str) -> TeamInvitation:
+        ref = self._client.collection("team_invitations").document(invitation_id)
+        snapshot = ref.get()
+        if not snapshot.exists:
+            raise ApiError(404, "invitation_not_found", "The invitation was not found.")
+        invitation = TeamInvitation.model_validate(snapshot.to_dict())
+        if invitation.business_id != tenant.business_id:
+            raise ApiError(404, "invitation_not_found", "The invitation was not found.")
+        if invitation.status != TeamInvitationStatus.PENDING:
+            raise ApiError(409, "invitation_not_pending", "The invitation is no longer active.")
+        now = datetime.now(UTC)
+        revoked = invitation.model_copy(
+            update={
+                "status": TeamInvitationStatus.REVOKED,
+                "revoked_by": tenant.user_id,
+                "revoked_at": now,
+            }
+        )
+        batch = self._client.batch()
+        batch.set(ref, revoked.model_dump(mode="json"))
+        batch.create(
+            self._client.collection("evidence_events").document(
+                f"evt_team_invitation_revoked_{invitation_id}"
+            ),
+            _event(
+                event_type=EvidenceEventType.TEAM_INVITATION_REVOKED,
+                tenant=tenant,
+                subject_type="team_invitation",
+                subject_id=invitation_id,
+                properties={"role": invitation.role.value},
+            ),
+        )
+        batch.commit()
+        return revoked
+
+    def list_members(self, tenant: TenantContext) -> list[Membership]:
+        return sorted(
+            (
+                self._parse_membership(tenant.business_id, snapshot.id, snapshot.to_dict() or {})
+                for snapshot in self._business_ref(tenant).collection("members").stream()
+            ),
+            key=lambda membership: membership.created_at,
+        )
+
+    def update_member_role(
+        self, tenant: TenantContext, user_id: str, role: MembershipRole
+    ) -> Membership:
+        ref = self._business_ref(tenant).collection("members").document(user_id)
+        snapshot = ref.get()
+        if not snapshot.exists:
+            raise ApiError(404, "member_not_found", "The team member was not found.")
+        current = self._parse_membership(tenant.business_id, user_id, snapshot.to_dict() or {})
+        if current.role == MembershipRole.OWNER:
+            raise ApiError(409, "owner_role_immutable", "The owner role cannot be changed.")
+        updated = current.model_copy(update={"role": role, "status": MembershipStatus.ACTIVE})
+        batch = self._client.batch()
+        batch.set(ref, updated.model_dump(mode="json"))
+        batch.create(
+            self._client.collection("evidence_events").document(
+                f"evt_team_role_{user_id}_{secrets.token_hex(8)}"
+            ),
+            _event(
+                event_type=EvidenceEventType.MEMBERSHIP_ROLE_CHANGED,
+                tenant=tenant,
+                subject_type="membership",
+                subject_id=user_id,
+                properties={"previous_role": current.role.value, "role": role.value},
+            ),
+        )
+        batch.commit()
+        return updated
+
+    def revoke_member(self, tenant: TenantContext, user_id: str) -> Membership:
+        ref = self._business_ref(tenant).collection("members").document(user_id)
+        snapshot = ref.get()
+        if not snapshot.exists:
+            raise ApiError(404, "member_not_found", "The team member was not found.")
+        current = self._parse_membership(tenant.business_id, user_id, snapshot.to_dict() or {})
+        if current.role == MembershipRole.OWNER:
+            raise ApiError(409, "owner_role_immutable", "The owner cannot be revoked.")
+        revoked = current.model_copy(update={"status": MembershipStatus.REVOKED})
+        batch = self._client.batch()
+        batch.set(ref, revoked.model_dump(mode="json"))
+        batch.set(
+            self._client.collection("users").document(user_id),
+            {"business_id": None, "updated_at": datetime.now(UTC)},
+            merge=True,
+        )
+        batch.create(
+            self._client.collection("evidence_events").document(
+                f"evt_team_revoked_{user_id}_{secrets.token_hex(8)}"
+            ),
+            _event(
+                event_type=EvidenceEventType.MEMBERSHIP_REVOKED,
+                tenant=tenant,
+                subject_type="membership",
+                subject_id=user_id,
+                properties={"role": current.role.value},
+            ),
+        )
+        batch.commit()
+        return revoked
+
     def get_consent(self, tenant: TenantContext, version: str) -> ConsentRecord | None:
         snapshot = (
             self._business_ref(tenant)
@@ -620,6 +899,97 @@ class FirestoreRepository:
         snapshot = self._client.collection("settings").document(tenant.business_id).get()
         return PolicyDefaults.model_validate(snapshot.to_dict() or {})
 
+    def update_policy_settings(
+        self, tenant: TenantContext, settings: PolicyDefaults
+    ) -> PolicyDefaults:
+        current = self.get_policy_settings(tenant)
+        if settings.reminder_cooldown_hours < current.reminder_cooldown_hours:
+            raise ApiError(422, "policy_less_restrictive", "Reminder cooldown cannot decrease.")
+        if settings.high_value_threshold_minor > current.high_value_threshold_minor:
+            raise ApiError(422, "policy_less_restrictive", "High-value threshold cannot increase.")
+        batch = self._client.batch()
+        batch.set(
+            self._client.collection("settings").document(tenant.business_id),
+            settings.model_dump(mode="json"),
+        )
+        event_id = f"evt_policy_changed_{secrets.token_hex(16)}"
+        batch.create(
+            self._client.collection("evidence_events").document(event_id),
+            _event(
+                event_type=EvidenceEventType.POLICY_CHANGED,
+                tenant=tenant,
+                subject_type="business",
+                subject_id=tenant.business_id,
+                properties={
+                    "previous_reminder_cooldown_hours": current.reminder_cooldown_hours,
+                    "reminder_cooldown_hours": settings.reminder_cooldown_hours,
+                    "previous_high_value_threshold_minor": current.high_value_threshold_minor,
+                    "high_value_threshold_minor": settings.high_value_threshold_minor,
+                    "hard_stops_immutable": True,
+                },
+            ),
+        )
+        batch.commit()
+        return settings
+
+    def update_customer_policy(
+        self,
+        tenant: TenantContext,
+        customer_id: str,
+        manual_only: bool | None,
+        locale: ReminderLocale | None,
+    ) -> CustomerSnapshot:
+        business_ref = self._business_ref(tenant)
+        matching: list[Invoice] = []
+        for snapshot in business_ref.collection("invoices").stream():
+            invoice = Invoice.model_validate(snapshot.to_dict())
+            if invoice.customer.id == customer_id:
+                matching.append(invoice)
+        if not matching:
+            raise ApiError(404, "customer_not_found", "The customer could not be found.")
+        current = matching[0].customer
+        updates: dict[str, Any] = {}
+        if manual_only is not None:
+            updates["manual_only"] = manual_only
+        if locale is not None:
+            updates["locale"] = locale
+        customer = current.model_copy(update=updates)
+        batch = self._client.batch()
+        now = datetime.now(UTC)
+        for invoice in matching:
+            updated_invoice = invoice.model_copy(
+                update={
+                    "customer": invoice.customer.model_copy(update=updates),
+                    "updated_at": now,
+                }
+            )
+            batch.set(
+                business_ref.collection("invoices").document(invoice.id),
+                updated_invoice.model_dump(mode="json"),
+            )
+        batch.set(
+            business_ref.collection("customers").document(customer_id),
+            {**customer.model_dump(mode="json"), "updated_at": now.isoformat()},
+            merge=True,
+        )
+        batch.create(
+            self._client.collection("evidence_events").document(
+                f"evt_customer_policy_{secrets.token_hex(16)}"
+            ),
+            _event(
+                event_type=EvidenceEventType.CUSTOMER_POLICY_CHANGED,
+                tenant=tenant,
+                subject_type="customer",
+                subject_id=customer_id,
+                properties={
+                    "manual_only": customer.manual_only,
+                    "locale": customer.locale.value,
+                },
+            ),
+        )
+        batch.commit()
+        return customer
+
     def list_actions(self, tenant: TenantContext, invoice_id: str) -> list[Action]:
         snapshots = (
             self._business_ref(tenant)
@@ -630,6 +1000,34 @@ class FirestoreRepository:
             .stream()
         )
         return [Action.model_validate(snapshot.to_dict()) for snapshot in snapshots]
+
+    def save_agent_proposal(self, tenant: TenantContext, run: AgentRun) -> None:
+        self.get_invoice(tenant, run.invoice_id)
+        batch = self._client.batch()
+        batch.create(
+            self._business_ref(tenant).collection("agent_runs").document(run.id),
+            run.model_dump(mode="json"),
+        )
+        batch.create(
+            self._client.collection("evidence_events").document(f"evt_decision_{run.id}"),
+            _event(
+                event_type=EvidenceEventType.AGENT_DECISION_CREATED,
+                tenant=tenant,
+                subject_type="invoice",
+                subject_id=run.invoice_id,
+                actor_type="AGENT",
+                properties={
+                    "agent_run_id": run.id,
+                    "model_id": run.model_id,
+                    "prompt_version": run.prompt_version,
+                    "status": run.status.value,
+                    "function_call_id": run.function_call_id,
+                    "proposed_function": run.proposed_function,
+                    "function_arguments": run.function_arguments,
+                },
+            ),
+        )
+        batch.commit()
 
     def save_evaluation(
         self, tenant: TenantContext, run: AgentRun, action: Action | None
@@ -689,29 +1087,10 @@ class FirestoreRepository:
                         },
                     )
                 stored_run = run.model_copy(update={"action_id": reserved.id})
-                txn.create(
+                txn.set(
                     business_ref.collection("agent_runs").document(run.id),
                     stored_run.model_dump(mode="json"),
                 )
-                if run.model_proposal is not None:
-                    txn.create(
-                        self._client.collection("evidence_events").document(
-                            f"evt_decision_{run.id}"
-                        ),
-                        _event(
-                            event_type=EvidenceEventType.AGENT_DECISION_CREATED,
-                            tenant=tenant,
-                            subject_type="invoice",
-                            subject_id=run.invoice_id,
-                            actor_type="AGENT",
-                            properties={
-                                "agent_run_id": run.id,
-                                "model_id": run.model_id,
-                                "prompt_version": run.prompt_version,
-                                "status": run.status.value,
-                            },
-                        ),
-                    )
                 if run.policy_result:
                     txn.create(
                         self._client.collection("evidence_events").document(f"evt_policy_{run.id}"),
@@ -753,26 +1132,9 @@ class FirestoreRepository:
             return Action.model_validate(reserve(transaction))
 
         batch = self._client.batch()
-        batch.create(
+        batch.set(
             business_ref.collection("agent_runs").document(run.id), run.model_dump(mode="json")
         )
-        if run.model_proposal is not None:
-            batch.create(
-                self._client.collection("evidence_events").document(f"evt_decision_{run.id}"),
-                _event(
-                    event_type=EvidenceEventType.AGENT_DECISION_CREATED,
-                    tenant=tenant,
-                    subject_type="invoice",
-                    subject_id=run.invoice_id,
-                    actor_type="AGENT",
-                    properties={
-                        "agent_run_id": run.id,
-                        "model_id": run.model_id,
-                        "prompt_version": run.prompt_version,
-                        "status": run.status.value,
-                    },
-                ),
-            )
         if run.policy_result:
             batch.create(
                 self._client.collection("evidence_events").document(f"evt_policy_{run.id}"),
@@ -956,6 +1318,36 @@ class FirestoreRepository:
         self._business_ref(tenant).collection("invoices").document(invoice.id).set(
             invoice.model_dump(mode="json")
         )
+        return invoice
+
+    def update_invoice_with_event(
+        self,
+        tenant: TenantContext,
+        invoice: Invoice,
+        event_type: EvidenceEventType,
+        properties: dict[str, Any],
+    ) -> Invoice:
+        current = self.get_invoice(tenant, invoice.id)
+        if current.business_id != invoice.business_id:
+            raise ApiError(409, "invoice_conflict", "The invoice tenant changed unexpectedly.")
+        batch = self._client.batch()
+        batch.set(
+            self._business_ref(tenant).collection("invoices").document(invoice.id),
+            invoice.model_dump(mode="json"),
+        )
+        batch.create(
+            self._client.collection("evidence_events").document(
+                f"evt_{event_type.value.replace('.', '_')}_{secrets.token_hex(16)}"
+            ),
+            _event(
+                event_type=event_type,
+                tenant=tenant,
+                subject_type="invoice",
+                subject_id=invoice.id,
+                properties=properties,
+            ),
+        )
+        batch.commit()
         return invoice
 
     def record_payment(self, tenant: TenantContext, payment: Payment) -> tuple[Payment, Invoice]:
@@ -1617,6 +2009,7 @@ class InMemoryRepository:
     def __init__(self) -> None:
         self.businesses: dict[str, Business] = {}
         self.memberships: dict[str, Membership] = {}
+        self.team_invitations: dict[str, TeamInvitation] = {}
         self.consents: dict[str, ConsentRecord] = {}
         self.optional_consents: dict[str, OptionalConsentEvent] = {}
         self.rate_limits: dict[str, tuple[int, datetime]] = {}
@@ -1680,7 +2073,163 @@ class InMemoryRepository:
         business, membership = self.get_account(user)
         if not business or not membership:
             raise ApiError(404, "business_not_found", "Complete business onboarding first.")
+        if membership.status != MembershipStatus.ACTIVE:
+            raise ApiError(403, "membership_inactive", "The business membership is not active.")
         return TenantContext(user_id=user.uid, business_id=business.id, role=membership.role)
+
+    def create_team_invitation(
+        self, tenant: TenantContext, invitation: TeamInvitation
+    ) -> TeamInvitation:
+        current_time = datetime.now(UTC)
+        if any(
+            existing.business_id == tenant.business_id
+            and str(existing.email).casefold() == str(invitation.email).casefold()
+            and existing.status == TeamInvitationStatus.PENDING
+            and existing.expires_at > current_time
+            for existing in self.team_invitations.values()
+        ):
+            raise ApiError(
+                409,
+                "invitation_already_pending",
+                "An active invitation already exists for this email.",
+            )
+        self.team_invitations[invitation.id] = invitation
+        self.evidence_events[f"evt_team_invited_{invitation.id}"] = _event(
+            event_type=EvidenceEventType.TEAM_INVITATION_CREATED,
+            tenant=tenant,
+            subject_type="team_invitation",
+            subject_id=invitation.id,
+            properties={"role": invitation.role.value},
+        )
+        return invitation
+
+    def list_team_invitations(self, tenant: TenantContext) -> list[TeamInvitation]:
+        return sorted(
+            (
+                invitation
+                for invitation in self.team_invitations.values()
+                if invitation.business_id == tenant.business_id
+            ),
+            key=lambda invitation: invitation.created_at,
+            reverse=True,
+        )
+
+    def accept_team_invitation(self, user: AuthenticatedUser, invitation_id: str) -> Membership:
+        invitation = self.team_invitations.get(invitation_id)
+        if invitation is None:
+            raise ApiError(404, "invitation_not_found", "The invitation was not found.")
+        if invitation.status != TeamInvitationStatus.PENDING:
+            raise ApiError(409, "invitation_not_pending", "The invitation is no longer active.")
+        now = datetime.now(UTC)
+        if invitation.expires_at <= now:
+            raise ApiError(409, "invitation_expired", "The invitation has expired.")
+        if user.email is None or user.email.casefold() != str(invitation.email).casefold():
+            raise ApiError(
+                403,
+                "invitation_email_mismatch",
+                "Sign in with the email address that was invited.",
+            )
+        current = self.memberships.get(user.uid)
+        if current and current.business_id != invitation.business_id:
+            raise ApiError(
+                409,
+                "membership_already_exists",
+                "This account already belongs to another business.",
+            )
+        membership = Membership(
+            business_id=invitation.business_id,
+            user_id=user.uid,
+            role=invitation.role,
+            status=MembershipStatus.ACTIVE,
+            created_at=now,
+        )
+        self.memberships[user.uid] = membership
+        self.team_invitations[invitation_id] = invitation.model_copy(
+            update={
+                "status": TeamInvitationStatus.ACCEPTED,
+                "accepted_by": user.uid,
+                "accepted_at": now,
+            }
+        )
+        accepted_tenant = TenantContext(user.uid, invitation.business_id, invitation.role)
+        self.evidence_events[f"evt_team_accepted_{invitation.id}"] = _event(
+            event_type=EvidenceEventType.TEAM_INVITATION_ACCEPTED,
+            tenant=accepted_tenant,
+            subject_type="membership",
+            subject_id=user.uid,
+            properties={"role": invitation.role.value},
+        )
+        return membership
+
+    def revoke_team_invitation(self, tenant: TenantContext, invitation_id: str) -> TeamInvitation:
+        invitation = self.team_invitations.get(invitation_id)
+        if invitation is None or invitation.business_id != tenant.business_id:
+            raise ApiError(404, "invitation_not_found", "The invitation was not found.")
+        if invitation.status != TeamInvitationStatus.PENDING:
+            raise ApiError(409, "invitation_not_pending", "The invitation is no longer active.")
+        now = datetime.now(UTC)
+        revoked = invitation.model_copy(
+            update={
+                "status": TeamInvitationStatus.REVOKED,
+                "revoked_by": tenant.user_id,
+                "revoked_at": now,
+            }
+        )
+        self.team_invitations[invitation_id] = revoked
+        self.evidence_events[f"evt_team_invitation_revoked_{invitation_id}"] = _event(
+            event_type=EvidenceEventType.TEAM_INVITATION_REVOKED,
+            tenant=tenant,
+            subject_type="team_invitation",
+            subject_id=invitation_id,
+            properties={"role": invitation.role.value},
+        )
+        return revoked
+
+    def list_members(self, tenant: TenantContext) -> list[Membership]:
+        return sorted(
+            (
+                membership
+                for membership in self.memberships.values()
+                if membership.business_id == tenant.business_id
+            ),
+            key=lambda membership: membership.created_at,
+        )
+
+    def update_member_role(
+        self, tenant: TenantContext, user_id: str, role: MembershipRole
+    ) -> Membership:
+        current = self.memberships.get(user_id)
+        if current is None or current.business_id != tenant.business_id:
+            raise ApiError(404, "member_not_found", "The team member was not found.")
+        if current.role == MembershipRole.OWNER:
+            raise ApiError(409, "owner_role_immutable", "The owner role cannot be changed.")
+        updated = current.model_copy(update={"role": role, "status": MembershipStatus.ACTIVE})
+        self.memberships[user_id] = updated
+        self.evidence_events[f"evt_team_role_{user_id}_{self._next_id('event')}"] = _event(
+            event_type=EvidenceEventType.MEMBERSHIP_ROLE_CHANGED,
+            tenant=tenant,
+            subject_type="membership",
+            subject_id=user_id,
+            properties={"previous_role": current.role.value, "role": role.value},
+        )
+        return updated
+
+    def revoke_member(self, tenant: TenantContext, user_id: str) -> Membership:
+        current = self.memberships.get(user_id)
+        if current is None or current.business_id != tenant.business_id:
+            raise ApiError(404, "member_not_found", "The team member was not found.")
+        if current.role == MembershipRole.OWNER:
+            raise ApiError(409, "owner_role_immutable", "The owner cannot be revoked.")
+        revoked = current.model_copy(update={"status": MembershipStatus.REVOKED})
+        self.memberships[user_id] = revoked
+        self.evidence_events[f"evt_team_revoked_{user_id}_{self._next_id('event')}"] = _event(
+            event_type=EvidenceEventType.MEMBERSHIP_REVOKED,
+            tenant=tenant,
+            subject_type="membership",
+            subject_id=user_id,
+            properties={"role": current.role.value},
+        )
+        return revoked
 
     def get_consent(self, tenant: TenantContext, version: str) -> ConsentRecord | None:
         return self.consents.get(_consent_id(tenant, version))
@@ -1861,6 +2410,67 @@ class InMemoryRepository:
     def get_policy_settings(self, tenant: TenantContext) -> PolicyDefaults:
         return self.policy_settings.get(tenant.business_id, PolicyDefaults())
 
+    def update_policy_settings(
+        self, tenant: TenantContext, settings: PolicyDefaults
+    ) -> PolicyDefaults:
+        current = self.get_policy_settings(tenant)
+        if settings.reminder_cooldown_hours < current.reminder_cooldown_hours:
+            raise ApiError(422, "policy_less_restrictive", "Reminder cooldown cannot decrease.")
+        if settings.high_value_threshold_minor > current.high_value_threshold_minor:
+            raise ApiError(422, "policy_less_restrictive", "High-value threshold cannot increase.")
+        self.policy_settings[tenant.business_id] = settings
+        self.evidence_events[f"evt_policy_changed_{self._next_id('event')}"] = _event(
+            event_type=EvidenceEventType.POLICY_CHANGED,
+            tenant=tenant,
+            subject_type="business",
+            subject_id=tenant.business_id,
+            properties={
+                "previous_reminder_cooldown_hours": current.reminder_cooldown_hours,
+                "reminder_cooldown_hours": settings.reminder_cooldown_hours,
+                "previous_high_value_threshold_minor": current.high_value_threshold_minor,
+                "high_value_threshold_minor": settings.high_value_threshold_minor,
+                "hard_stops_immutable": True,
+            },
+        )
+        return settings
+
+    def update_customer_policy(
+        self,
+        tenant: TenantContext,
+        customer_id: str,
+        manual_only: bool | None,
+        locale: ReminderLocale | None,
+    ) -> CustomerSnapshot:
+        matching = [
+            invoice
+            for invoice in self.invoices.values()
+            if invoice.business_id == tenant.business_id and invoice.customer.id == customer_id
+        ]
+        if not matching:
+            raise ApiError(404, "customer_not_found", "The customer could not be found.")
+        updates: dict[str, Any] = {}
+        if manual_only is not None:
+            updates["manual_only"] = manual_only
+        if locale is not None:
+            updates["locale"] = locale
+        now = datetime.now(UTC)
+        for invoice in matching:
+            self.invoices[invoice.id] = invoice.model_copy(
+                update={
+                    "customer": invoice.customer.model_copy(update=updates),
+                    "updated_at": now,
+                }
+            )
+        customer = matching[0].customer.model_copy(update=updates)
+        self.evidence_events[f"evt_customer_policy_{self._next_id('event')}"] = _event(
+            event_type=EvidenceEventType.CUSTOMER_POLICY_CHANGED,
+            tenant=tenant,
+            subject_type="customer",
+            subject_id=customer_id,
+            properties={"manual_only": customer.manual_only, "locale": customer.locale.value},
+        )
+        return customer
+
     def list_actions(self, tenant: TenantContext, invoice_id: str) -> list[Action]:
         self.get_invoice(tenant, invoice_id)
         return sorted(
@@ -1869,20 +2479,33 @@ class InMemoryRepository:
             reverse=True,
         )
 
+    def save_agent_proposal(self, tenant: TenantContext, run: AgentRun) -> None:
+        self.get_invoice(tenant, run.invoice_id)
+        if run.id in self.agent_runs:
+            raise ApiError(409, "agent_run_exists", "The agent run already exists.")
+        self.agent_runs[run.id] = run
+        self.evidence_events[f"evt_decision_{run.id}"] = _event(
+            event_type=EvidenceEventType.AGENT_DECISION_CREATED,
+            tenant=tenant,
+            subject_type="invoice",
+            subject_id=run.invoice_id,
+            properties={
+                "agent_run_id": run.id,
+                "model_id": run.model_id,
+                "prompt_version": run.prompt_version,
+                "status": run.status.value,
+                "function_call_id": run.function_call_id,
+                "proposed_function": run.proposed_function,
+                "function_arguments": run.function_arguments,
+            },
+            actor_type="AGENT",
+        )
+
     def save_evaluation(
         self, tenant: TenantContext, run: AgentRun, action: Action | None
     ) -> Action | None:
         self.get_invoice(tenant, run.invoice_id)
         self.agent_runs[run.id] = run
-        if run.model_proposal is not None:
-            self.evidence_events[f"evt_decision_{run.id}"] = _event(
-                event_type=EvidenceEventType.AGENT_DECISION_CREATED,
-                tenant=tenant,
-                subject_type="invoice",
-                subject_id=run.invoice_id,
-                properties={"model_id": run.model_id, "prompt_version": run.prompt_version},
-                actor_type="AGENT",
-            )
         if run.policy_result is not None:
             self.evidence_events[f"evt_policy_{run.id}"] = _event(
                 event_type=EvidenceEventType.POLICY_CHECKED,
@@ -2074,6 +2697,26 @@ class InMemoryRepository:
     def update_invoice(self, tenant: TenantContext, invoice: Invoice) -> Invoice:
         self.get_invoice(tenant, invoice.id)
         self.invoices[invoice.id] = invoice
+        return invoice
+
+    def update_invoice_with_event(
+        self,
+        tenant: TenantContext,
+        invoice: Invoice,
+        event_type: EvidenceEventType,
+        properties: dict[str, Any],
+    ) -> Invoice:
+        self.get_invoice(tenant, invoice.id)
+        self.invoices[invoice.id] = invoice
+        self.evidence_events[
+            f"evt_{event_type.value.replace('.', '_')}_{self._next_id('event')}"
+        ] = _event(
+            event_type=event_type,
+            tenant=tenant,
+            subject_type="invoice",
+            subject_id=invoice.id,
+            properties=properties,
+        )
         return invoice
 
     def record_payment(self, tenant: TenantContext, payment: Payment) -> tuple[Payment, Invoice]:

@@ -15,8 +15,8 @@ export interface Business {
 export interface Membership {
   business_id: string;
   user_id: string;
-  role: "OWNER";
-  status: "ACTIVE";
+  role: "OWNER" | "ADMIN" | "OPERATOR" | "ADVISOR";
+  status: "ACTIVE" | "REVOKED";
   created_at: string;
 }
 
@@ -78,6 +78,7 @@ export interface CustomerSnapshot {
   name: string;
   email: string | null;
   manual_only: boolean;
+  locale: "en-IN" | "hi-IN";
 }
 
 export interface Invoice {
@@ -93,6 +94,12 @@ export interface Invoice {
   payment_terms: string | null;
   review_required: boolean;
   review_reason: string | null;
+  dispute_active: boolean;
+  dispute_reason: "INVOICE_ERROR" | "SERVICE_ISSUE" | "PAYMENT_CLAIM" | "TERMS_DISAGREEMENT" | "OTHER" | null;
+  dispute_note: string | null;
+  dispute_opened_at: string | null;
+  dispute_resolution_note: string | null;
+  dispute_resolved_at: string | null;
   created_at: string;
   updated_at: string;
   verified_paid_minor: number;
@@ -138,7 +145,7 @@ export interface AgentRun {
   id: string;
   invoice_id: string;
   business_id: string;
-  status: "SUCCEEDED" | "FAILED" | "HUMAN_REVIEW";
+  status: "PROPOSED" | "SUCCEEDED" | "FAILED" | "HUMAN_REVIEW";
   invoice_state: InvoiceState;
   model_proposal: ModelDecision | null;
   policy_result: PolicyResult | null;
@@ -149,6 +156,9 @@ export interface AgentRun {
   failure_code: string | null;
   created_at: string;
   action_id: string | null;
+  function_call_id: string | null;
+  proposed_function: string | null;
+  function_arguments: Record<string, unknown> | null;
 }
 
 export interface ProposedAction {
@@ -176,6 +186,8 @@ export interface ProposedAction {
   delivery_possible: boolean | null;
   resolution: "CONFIRMED_DELIVERED" | "CONFIRMED_NOT_DELIVERED" | "MANUALLY_SENT" | null;
   attempt_count: number;
+  locale: "en-IN" | "hi-IN";
+  template_version: string;
 }
 
 export interface InvoiceDetail {
@@ -211,7 +223,22 @@ export interface PolicySettings {
   reminder_cooldown_hours: number;
   high_value_threshold_minor: number;
   high_value_currency: string;
+  dispute_requires_human: boolean;
+  legal_language_allowed: boolean;
+  payment_confirmation_required: boolean;
   automation_enabled: boolean;
+}
+
+export interface PolicyTemplate {
+  template: "AGENCY" | "CONSULTANT" | "MANUFACTURER";
+  label: string;
+  reminder_cooldown_hours: number;
+  high_value_threshold_minor: number;
+  hard_stops_immutable: true;
+}
+
+export interface PolicyTemplatePage {
+  items: PolicyTemplate[];
 }
 
 export interface CurrencyMetrics {
@@ -234,6 +261,52 @@ export interface MetricsResponse {
   automation_rate: number;
   average_days_overdue: number;
   pending_approvals: number;
+  repeat_customer_count: number;
+  reconciliation_lag_days: number;
+  exception_rate: number;
+  gmail_delivery_rate: number;
+  renewal_intent: string | null;
+}
+
+export interface ForecastBucket {
+  starts_on: string;
+  ends_on: string;
+  expected_inflow_by_currency: Record<string, number>;
+  invoice_count: number;
+}
+
+export interface ForecastHorizon {
+  weeks: 4 | 8 | 12;
+  expected_inflow_by_currency: Record<string, number>;
+  buckets: ForecastBucket[];
+}
+
+export interface CashForecast {
+  generated_at: string;
+  methodology_version: string;
+  observed_payment_delay_days: number;
+  horizons: ForecastHorizon[];
+}
+
+export interface TeamInvitation {
+  id: string;
+  business_id: string;
+  email: string;
+  role: "ADMIN" | "OPERATOR" | "ADVISOR";
+  status: "PENDING" | "ACCEPTED" | "REVOKED" | "EXPIRED";
+  invited_by: string;
+  created_at: string;
+  expires_at: string;
+  accepted_by: string | null;
+  accepted_at: string | null;
+}
+
+export interface TeamInvitationPage {
+  items: TeamInvitation[];
+}
+
+export interface MembershipPage {
+  items: Membership[];
 }
 
 export interface TimelineEntry {

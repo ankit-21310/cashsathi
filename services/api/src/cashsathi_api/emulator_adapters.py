@@ -45,7 +45,10 @@ class EmulatorDecisionAdapter:
     model_id = "emulator-gemini"
     prompt_version = "emulator-decision-v1"
 
-    def decide(self, _invoice: object, _state: object, _actions: object) -> DecisionOutput:
+    def decide(
+        self, invoice: object, _state: object, _actions: object, _policy: object
+    ) -> DecisionOutput:
+        invoice_id = str(getattr(invoice, "id", "emulator-invoice"))
         return DecisionOutput(
             proposal=ModelDecision(
                 decision=AgentDecision.SEND_REMINDER,
@@ -57,6 +60,14 @@ class EmulatorDecisionAdapter:
             latency_ms=1,
             input_tokens=0,
             output_tokens=0,
+            function_call_id=f"emulator-call-{invoice_id}",
+            proposed_function="send_payment_reminder",
+            function_arguments={
+                "invoice_id": invoice_id,
+                "tone": "WARM",
+                "intent": "OVERDUE_FOLLOWUP",
+                "risk_flags": [],
+            },
         )
 
 

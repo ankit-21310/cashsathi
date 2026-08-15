@@ -74,6 +74,7 @@ export default function DashboardPage() {
         <section className="metric-grid metric-grid-six" aria-label="Receivables metrics">
           <article><span>Monitored value</span><strong>{amount(primary?.monitored_minor)}</strong><small>{metrics?.invoice_count ?? 0} invoices</small></article>
           <article><span>Outstanding</span><strong>{amount(primary?.outstanding_minor)}</strong><small>{metrics?.overdue_count ?? 0} overdue</small></article>
+          <article><span>Overdue value</span><strong>{amount(primary?.overdue_minor)}</strong><small>Past deterministic due date</small></article>
           <article><span>Verified paid</span><strong>{amount(primary?.verified_paid_minor)}</strong><small>Owner-confirmed only</small></article>
           <article><span>AI decisions</span><strong>{metrics?.ai_decisions ?? 0}</strong><small>{metrics?.successful_actions ?? 0} successful actions</small></article>
           <article><span>Automation rate</span><strong>{Math.round((metrics?.automation_rate ?? 0) * 100)}%</strong><small>Confirmed deliveries</small></article>

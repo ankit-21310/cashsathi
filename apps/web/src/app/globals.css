@@ -167,6 +167,8 @@ input:focus, select:focus, textarea:focus { border-color: var(--green); box-shad
 .detail-card > span, .detail-card small { color: var(--muted); }
 .detail-card > strong:not(.state-badge) { font-size: 1.35rem; }
 .amount-card > strong { font-size: 2.1rem !important; letter-spacing: -.04em; }
+.safety-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 20px; }
+.safety-controls h2 { margin: 8px 0 0; }
 .decision-panel { background: var(--paper); border: 1px solid var(--line); border-radius: 20px; overflow: hidden; }
 .decision-content { padding: 28px; }
 .decision-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
@@ -214,7 +216,17 @@ input:focus, select:focus, textarea:focus { border-color: var(--green); box-shad
 .ledger-form label { margin-top: 12px; }
 .ledger-form .button { margin-top: 18px; }
 .ledger-list { margin-top: 20px; }
-.action-preview { margin-top: 22px; padding: 18px; background: #f2f4ef; border-radius: 13px; }
+.team-panel { margin-top: 20px; }
+.team-row { padding: 18px 24px; display: grid; grid-template-columns: minmax(220px, 1fr) minmax(130px, auto) auto; align-items: center; gap: 16px; border-bottom: 1px solid var(--line); }
+.team-row:last-child { border-bottom: 0; }
+.team-row p { margin: 5px 0 0; color: var(--muted); font-size: .82rem; }
+.team-role-form { display: flex; grid-template-columns: none; gap: 8px; }
+.team-role-form select { min-width: 130px; }
+.template-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; padding: 0 24px 24px; }
+.template-card { display: grid; align-content: start; gap: 9px; padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: #f9faf6; }
+.template-card span { color: var(--muted); font-size: .84rem; }
+.template-card .button { margin-top: 8px; }
+.action-preview { margin-top: 22px; padding: 18px; background: #f2f4ef; border-radius: 13px; display: grid; gap: 10px; }
 .payment-form { margin-top: 20px; display: grid; gap: 14px; }
 .payment-form h2 { margin: 8px 0; }
 .payment-form p { color: var(--muted); margin: 0; }
@@ -227,14 +239,15 @@ input:focus, select:focus, textarea:focus { border-color: var(--green); box-shad
 .timeline time { color: #7c8680; font-size: .78rem; }
 
 @media (max-width: 900px) {
-  .metric-grid-six, .action-grid, .currency-grid, .admin-grid, .consent-grid { grid-template-columns: 1fr 1fr; }
+  .metric-grid-six, .action-grid, .currency-grid, .admin-grid, .consent-grid, .safety-controls, .template-grid { grid-template-columns: 1fr 1fr; }
   .app-header { height: auto; min-height: 76px; padding-top: 14px; padding-bottom: 14px; gap: 16px; }
   .app-navigation { flex-wrap: wrap; gap: 12px 18px; }
 }
 
 @media (max-width: 640px) {
-  .metric-grid-six, .action-grid, .currency-grid, .admin-grid, .consent-grid, .pricing-panel { grid-template-columns: 1fr; }
+  .metric-grid-six, .action-grid, .currency-grid, .admin-grid, .consent-grid, .pricing-panel, .safety-controls, .template-grid { grid-template-columns: 1fr; }
   .activity-row { grid-template-columns: 1fr; }
+  .team-row { grid-template-columns: 1fr; }
   .data-banner { flex-direction: column; }
   .app-header { align-items: flex-start; }
   .app-navigation > a:first-child { width: 100%; }

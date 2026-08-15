@@ -44,6 +44,7 @@ packages = ["src/cashsathi_api"]
 addopts = "-q --strict-markers --cov=cashsathi_api --cov-report=term-missing"
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = ["firestore: integration tests that require the Firestore emulator"]
 
 [tool.ruff]
 target-version = "py313"

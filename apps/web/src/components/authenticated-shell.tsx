@@ -29,13 +29,16 @@ export function AuthenticatedShell({ children }: { children: ReactNode }) {
     <div className="app-shell">
       <header className="app-header">
         <div className="app-navigation">
-          <Link href="/dashboard"><Brand /></Link>
+          <Brand href="/dashboard" />
           <Link href="/dashboard">Invoices</Link>
           <Link href="/invoices/new">Upload</Link>
           <Link href="/activity">Activity</Link>
           <Link href="/approvals">Approvals</Link>
           <Link href="/impact">Impact</Link>
           <Link href="/integrations/gmail">Gmail</Link>
+          {(account?.membership?.role === "OWNER" || account?.membership?.role === "ADMIN") && <Link href="/settings">Settings</Link>}
+          {(account?.membership?.role === "OWNER" || account?.membership?.role === "ADMIN") && <Link href="/team">Team</Link>}
+          {(account?.membership?.role === "OWNER" || account?.membership?.role === "ADMIN" || account?.membership?.role === "ADVISOR") && <Link href="/finance">Finance</Link>}
           <Link href="/privacy">Privacy</Link>
           {account?.is_platform_admin && <Link href="/admin/impact">Admin</Link>}
         </div>

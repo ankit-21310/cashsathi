@@ -7,14 +7,18 @@ const firebaseOrigins = (
   process.env.NEXT_PUBLIC_CSP_FIREBASE_ORIGINS ??
   "https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com"
 ).trim();
+const firebaseEmulatorOrigin =
+  process.env.NEXT_PUBLIC_USE_FIREBASE_EMULATOR === "true"
+    ? " http://127.0.0.1:9099"
+    : "";
 const csp = [
   "default-src 'self'",
-  `script-src 'self' 'unsafe-inline'${isDevelopment ? " 'unsafe-eval'" : ""}`,
+  `script-src 'self' 'unsafe-inline' https://apis.google.com${isDevelopment ? " 'unsafe-eval'" : ""}`,
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: https:",
   "font-src 'self' data:",
-  `connect-src 'self' ${apiOrigin} https://${firebaseAuthDomain} ${firebaseOrigins} https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://www.googleapis.com`,
-  `frame-src https://accounts.google.com https://${firebaseAuthDomain}`,
+  `connect-src 'self' ${apiOrigin} https://${firebaseAuthDomain} ${firebaseOrigins}${firebaseEmulatorOrigin} https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://www.googleapis.com`,
+  `frame-src https://accounts.google.com https://apis.google.com https://${firebaseAuthDomain}${firebaseEmulatorOrigin}`,
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",
@@ -23,6 +27,7 @@ const csp = [
 ].join("; ");
 
 const nextConfig: NextConfig = {
+  distDir: process.env.NEXT_DIST_DIR || ".next",
   output: "standalone",
   poweredByHeader: false,
   async headers() {

@@ -96,7 +96,9 @@ test.describe("fresh browser owner journey", () => {
     await page.getByLabel("Public website").fill("https://example.test");
     await page.getByLabel("Public contact channel").fill("Public website contact form");
     await page.getByRole("button", { name: "Add prospect" }).click();
-    await expect(page.getByText(`Public Demo Company ${unique}`, { exact: true })).toBeVisible();
+    await expect(
+      page.locator(".validation-row").filter({ hasText: `Public Demo Company ${unique}` }),
+    ).toBeVisible();
 
     await page.getByRole("link", { name: "Evidence dashboard" }).click();
     const downloadPromise = page.waitForEvent("download");

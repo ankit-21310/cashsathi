@@ -25,7 +25,7 @@ Before deployment, add secret versions for `gemini-api-key`, `gmail-oauth-client
 4. Pass the Firebase UIDs allowed to view company-wide evidence with `-PlatformAdminUids`; leave it empty when no administrator should exist.
 5. Confirm the `cashsathi-hourly-recheck` Scheduler job uses the dedicated scheduler identity, the API service URL as its OIDC audience, and an hourly Asia/Kolkata schedule.
 
-Existing databases should run `uv run python scripts/backfill_phase_4.py --project <id>` and `uv run python scripts/backfill_phase_6_7.py --project <id>` first as dry runs, then repeat each with `--apply`. The backfills never send email or alter invoice outcomes. Phase 6–7 assigns stable random evidence pseudonyms and additive defaults.
+Existing databases should run `uv run python scripts/backfill_phase_4.py --project <id>`, `uv run python scripts/backfill_phase_6_7.py --project <id>`, and `uv run python scripts/backfill_phase_9.py --project <id>` first as dry runs, then repeat each with `--apply`. The backfills never send email or alter invoice outcomes. Phase 6–7 assigns stable random evidence pseudonyms and additive defaults; Phase 9 defaults legacy members to `OWNER` and legacy customer/action locale metadata to `en-IN`.
 
 Import the curated public-business prospect file with `uv run python scripts/import_validation_prospects.py --project <id> --admin-uid <uid>` from `services/api`; inspect the dry-run counts and add `--apply` only when correct. The import is idempotent and never sends messages or imports enriched personal contacts.
 

@@ -33,6 +33,9 @@ from cashsathi_api.decisioning import (
 from cashsathi_api.domain import (
     AccountDelete,
     AccountDeleteResult,
+    AccountingIntegrationPage,
+    AccountingIntegrationStatus,
+    AccountingProvider,
     Action,
     ActionCancel,
     ActionPage,
@@ -46,12 +49,17 @@ from cashsathi_api.domain import (
     BusinessClassificationUpdate,
     BusinessCreate,
     BusinessPage,
+    CashForecast,
     ConsentAccept,
     ConsentEventAction,
     ConsentStatus,
+    CustomerPolicyUpdate,
     CustomerSnapshot,
+    DisputeCreate,
+    DisputeResolve,
     ErrorEnvelope,
     EvaluationResult,
+    EvidenceEventType,
     EvidenceLedgerCreate,
     EvidenceLedgerEntry,
     EvidenceLedgerPage,
@@ -68,6 +76,7 @@ from cashsathi_api.domain import (
     Interview,
     InterviewCreate,
     InterviewPage,
+    InvitationRevoke,
     Invoice,
     InvoiceConfirm,
     InvoiceDetail,
@@ -75,6 +84,11 @@ from cashsathi_api.domain import (
     InvoiceSummary,
     InvoiceTimeline,
     InvoiceWorkflowStatus,
+    Membership,
+    MembershipPage,
+    MembershipRevoke,
+    MembershipRole,
+    MembershipRoleUpdate,
     MeResponse,
     MetricsResponse,
     OptionalConsentEvent,
@@ -85,12 +99,19 @@ from cashsathi_api.domain import (
     Payment,
     PaymentCreate,
     PolicyDefaults,
+    PolicyTemplateApply,
+    PolicyTemplateKind,
+    PolicyTemplatePage,
     Prospect,
     ProspectCreate,
     ProspectPage,
     ProspectStatus,
     ProspectUpdate,
     RecheckResult,
+    RestrictivePolicyUpdate,
+    TeamInvitation,
+    TeamInvitationCreate,
+    TeamInvitationPage,
     TenantContext,
 )
 from cashsathi_api.emulator_adapters import (
@@ -122,6 +143,12 @@ from cashsathi_api.invoice_processing import (
 )
 from cashsathi_api.money import decimal_to_minor
 from cashsathi_api.observability import RequestContextMiddleware, configure_logging
+from cashsathi_api.phase9 import (
+    accounting_integration_statuses,
+    build_cash_forecast,
+    build_finance_readiness_zip,
+    restrictive_policy_templates,
+)
 from cashsathi_api.phase67 import (
     OPTIONAL_CONSENTS,
     active_optional_consents,
@@ -170,6 +197,21 @@ def workflow_from(request: Request) -> CollectionWorkflow:
 def require_admin(user: AuthenticatedUser, settings: Settings) -> None:
     if user.uid not in settings.admin_uids:
         raise ApiError(403, "admin_required", "Platform administrator access is required.")
+
+
+def require_membership_role(tenant: TenantContext, *allowed: MembershipRole) -> None:
+    if tenant.role not in allowed:
+        raise ApiError(
+            403,
+            "role_forbidden",
+            "Your business role does not allow this operation.",
+        )
+
+
+def action_visible_to_role(action: Action, tenant: TenantContext) -> Action:
+    if tenant.role != MembershipRole.ADVISOR:
+        return action
+    return action.model_copy(update={"recipient_email": None, "subject": None, "body": None})
 
 
 PROSPECT_TRANSITIONS: dict[ProspectStatus, set[ProspectStatus]] = {
@@ -395,6 +437,126 @@ def create_app(
             is_platform_admin=user.uid in runtime_settings.admin_uids,
         )
 
+    @application.post("/api/team/invitations", response_model=TeamInvitation, tags=["team"])
+    def create_team_invitation(
+        payload: TeamInvitationCreate,
+        user: UserDependency,
+        repo: RepositoryDependency,
+    ) -> TeamInvitation:
+        tenant = repo.require_tenant(user)
+        require_membership_role(tenant, MembershipRole.OWNER, MembershipRole.ADMIN)
+        if tenant.role == MembershipRole.ADMIN and payload.role == MembershipRole.ADMIN:
+            raise ApiError(403, "role_forbidden", "Only the owner can invite an administrator.")
+        now = datetime.now(UTC)
+        invitation = TeamInvitation(
+            id=f"invite_{uuid4().hex}",
+            business_id=tenant.business_id,
+            email=payload.email,
+            role=payload.role,
+            status="PENDING",
+            invited_by=tenant.user_id,
+            created_at=now,
+            expires_at=now + timedelta(days=7),
+        )
+        return repo.create_team_invitation(tenant, invitation)
+
+    @application.get("/api/team/invitations", response_model=TeamInvitationPage, tags=["team"])
+    def list_team_invitations(
+        user: UserDependency, repo: RepositoryDependency
+    ) -> TeamInvitationPage:
+        tenant = repo.require_tenant(user)
+        require_membership_role(tenant, MembershipRole.OWNER, MembershipRole.ADMIN)
+        return TeamInvitationPage(items=repo.list_team_invitations(tenant))
+
+    @application.post(
+        "/api/team/invitations/{invitation_id}/accept",
+        response_model=Membership,
+        tags=["team"],
+    )
+    def accept_team_invitation(
+        invitation_id: str, user: UserDependency, repo: RepositoryDependency
+    ) -> Membership:
+        return repo.accept_team_invitation(user, invitation_id)
+
+    @application.post(
+        "/api/team/invitations/{invitation_id}/revoke",
+        response_model=TeamInvitation,
+        tags=["team"],
+    )
+    def revoke_team_invitation(
+        invitation_id: str,
+        _payload: InvitationRevoke,
+        user: UserDependency,
+        repo: RepositoryDependency,
+    ) -> TeamInvitation:
+        tenant = repo.require_tenant(user)
+        require_membership_role(tenant, MembershipRole.OWNER, MembershipRole.ADMIN)
+        invitation = next(
+            (item for item in repo.list_team_invitations(tenant) if item.id == invitation_id),
+            None,
+        )
+        if invitation is None:
+            raise ApiError(404, "invitation_not_found", "The invitation was not found.")
+        if tenant.role == MembershipRole.ADMIN and invitation.role == MembershipRole.ADMIN:
+            raise ApiError(
+                403, "role_forbidden", "Only the owner can manage an administrator invitation."
+            )
+        return repo.revoke_team_invitation(tenant, invitation_id)
+
+    @application.get("/api/team/members", response_model=MembershipPage, tags=["team"])
+    def list_team_members(user: UserDependency, repo: RepositoryDependency) -> MembershipPage:
+        tenant = repo.require_tenant(user)
+        require_membership_role(tenant, MembershipRole.OWNER, MembershipRole.ADMIN)
+        return MembershipPage(items=repo.list_members(tenant))
+
+    @application.patch(
+        "/api/team/members/{member_user_id}", response_model=Membership, tags=["team"]
+    )
+    def update_team_member(
+        member_user_id: str,
+        payload: MembershipRoleUpdate,
+        user: UserDependency,
+        repo: RepositoryDependency,
+    ) -> Membership:
+        tenant = repo.require_tenant(user)
+        require_membership_role(tenant, MembershipRole.OWNER, MembershipRole.ADMIN)
+        target = next(
+            (item for item in repo.list_members(tenant) if item.user_id == member_user_id),
+            None,
+        )
+        if target is None:
+            raise ApiError(404, "member_not_found", "The team member was not found.")
+        if tenant.role == MembershipRole.ADMIN and (
+            target.role == MembershipRole.ADMIN or payload.role == MembershipRole.ADMIN
+        ):
+            raise ApiError(403, "role_forbidden", "Only the owner can manage administrators.")
+        return repo.update_member_role(tenant, member_user_id, payload.role)
+
+    @application.post(
+        "/api/team/members/{member_user_id}/revoke",
+        response_model=Membership,
+        tags=["team"],
+    )
+    def revoke_team_member(
+        member_user_id: str,
+        _payload: MembershipRevoke,
+        user: UserDependency,
+        repo: RepositoryDependency,
+    ) -> Membership:
+        tenant = repo.require_tenant(user)
+        require_membership_role(tenant, MembershipRole.OWNER, MembershipRole.ADMIN)
+        if member_user_id == tenant.user_id:
+            raise ApiError(409, "self_revocation_forbidden", "You cannot revoke yourself.")
+        target = next(
+            (item for item in repo.list_members(tenant) if item.user_id == member_user_id),
+            None,
+        )
+        if target is None:
+            raise ApiError(404, "member_not_found", "The team member was not found.")
+        if tenant.role == MembershipRole.ADMIN and target.role == MembershipRole.ADMIN:
+            raise ApiError(403, "role_forbidden", "Only the owner can revoke an administrator.")
+        return repo.revoke_member(tenant, member_user_id)
+
     @application.post("/api/businesses", response_model=Business, tags=["businesses"])
     def create_business(
         payload: BusinessCreate, user: UserDependency, repo: RepositoryDependency
@@ -436,6 +598,7 @@ def create_app(
         payload: ConsentAccept, user: UserDependency, repo: RepositoryDependency
     ) -> ConsentStatus:
         tenant = repo.require_tenant(user)
+        require_membership_role(tenant, MembershipRole.OWNER, MembershipRole.ADMIN)
         if payload.version != PRODUCT_CONSENT_VERSION:
             raise ApiError(
                 409,
@@ -470,6 +633,7 @@ def create_app(
         repo: RepositoryDependency,
     ) -> OptionalConsentResponse:
         tenant = repo.require_tenant(user)
+        require_membership_role(tenant, MembershipRole.OWNER)
         version, _statement = OPTIONAL_CONSENTS[consent_type]
         if payload.version != version:
             raise ApiError(
@@ -522,6 +686,7 @@ def create_app(
         repo: RepositoryDependency,
     ) -> OptionalConsentResponse:
         tenant = repo.require_tenant(user)
+        require_membership_role(tenant, MembershipRole.OWNER)
         events = repo.list_optional_consents(tenant)
         grant = next(
             (
@@ -554,6 +719,7 @@ def create_app(
     @application.get("/api/account/export", tags=["privacy"])
     def account_export(user: UserDependency, repo: RepositoryDependency) -> Response:
         tenant = repo.require_tenant(user)
+        require_membership_role(tenant, MembershipRole.OWNER, MembershipRole.ADMIN)
         enforce_rate_limit(repo, tenant.business_id, "account_export", 3, 3600)
         export = build_account_export(repo, tenant, PRODUCT_CONSENT_VERSION)
         return Response(
@@ -574,6 +740,7 @@ def create_app(
         repo: RepositoryDependency,
     ) -> AccountDeleteResult:
         tenant = repo.require_tenant(user)
+        require_membership_role(tenant, MembershipRole.OWNER)
         enforce_rate_limit(repo, tenant.user_id, "account_delete", 3, 86400)
         business = repo.get_business_by_id(tenant.business_id)
         if payload.business_name.strip().casefold() != business.name.strip().casefold():
@@ -637,6 +804,9 @@ def create_app(
         file: Annotated[UploadFile, File()],
     ) -> ExtractionResult:
         tenant = repo.require_tenant(user)
+        require_membership_role(
+            tenant, MembershipRole.OWNER, MembershipRole.ADMIN, MembershipRole.OPERATOR
+        )
         enforce_rate_limit(repo, tenant.business_id, "invoice_extract", 5, 600)
         if repo.get_consent(tenant, PRODUCT_CONSENT_VERSION) is None:
             raise ApiError(
@@ -693,6 +863,9 @@ def create_app(
         payload: InvoiceConfirm, user: UserDependency, repo: RepositoryDependency
     ) -> Invoice:
         tenant = repo.require_tenant(user)
+        require_membership_role(
+            tenant, MembershipRole.OWNER, MembershipRole.ADMIN, MembershipRole.OPERATOR
+        )
         if repo.get_consent(tenant, PRODUCT_CONSENT_VERSION) is None:
             raise ApiError(403, "consent_required", "Product-processing consent is required.")
         amount_minor = decimal_to_minor(payload.amount_decimal, payload.currency)
@@ -759,7 +932,139 @@ def create_app(
             invoice=invoice,
             current_state=calculate_invoice_state(invoice, actions),
             latest_agent_run=runs[0] if runs else None,
-            latest_action=actions[0] if actions else None,
+            latest_action=action_visible_to_role(actions[0], tenant) if actions else None,
+        )
+
+    @application.patch(
+        "/api/customers/{customer_id}", response_model=CustomerSnapshot, tags=["customers"]
+    )
+    def update_customer_policy(
+        customer_id: str,
+        payload: CustomerPolicyUpdate,
+        user: UserDependency,
+        repo: RepositoryDependency,
+    ) -> CustomerSnapshot:
+        tenant = repo.require_tenant(user)
+        require_membership_role(tenant, MembershipRole.OWNER, MembershipRole.ADMIN)
+        return repo.update_customer_policy(
+            tenant,
+            customer_id,
+            payload.manual_only,
+            payload.locale,
+        )
+
+    @application.post(
+        "/api/invoices/{invoice_id}/disputes", response_model=Invoice, tags=["invoices"]
+    )
+    def open_dispute(
+        invoice_id: str,
+        payload: DisputeCreate,
+        user: UserDependency,
+        repo: RepositoryDependency,
+    ) -> Invoice:
+        tenant = repo.require_tenant(user)
+        require_membership_role(
+            tenant, MembershipRole.OWNER, MembershipRole.ADMIN, MembershipRole.OPERATOR
+        )
+        invoice = repo.get_invoice(tenant, invoice_id)
+        if invoice.dispute_active:
+            raise ApiError(409, "dispute_already_active", "The invoice is already disputed.")
+        if invoice.workflow_status == InvoiceWorkflowStatus.CLOSED:
+            raise ApiError(409, "invoice_closed", "A closed invoice cannot be disputed.")
+        now = datetime.now(UTC)
+        cancelled_action_id: str | None = None
+        if invoice.active_action_id:
+            action = repo.get_action(tenant, invoice.active_action_id)
+            if action.state in {
+                ActionState.PROPOSED,
+                ActionState.AWAITING_APPROVAL,
+                ActionState.FAILED,
+            }:
+                cancelled = action.model_copy(
+                    update={
+                        "state": ActionState.CANCELLED,
+                        "cancelled_by": tenant.user_id,
+                        "cancelled_at": now,
+                        "cancel_reason": "Invoice dispute opened",
+                    }
+                )
+                repo.update_action(
+                    tenant,
+                    cancelled,
+                    None,
+                    EvidenceEventType.ACTION_CANCELLED,
+                    "USER",
+                )
+                cancelled_action_id = action.id
+        disputed = invoice.model_copy(
+            update={
+                "dispute_active": True,
+                "dispute_reason": payload.reason,
+                "dispute_note": payload.note,
+                "dispute_opened_at": now,
+                "dispute_opened_by": tenant.user_id,
+                "dispute_resolution_note": None,
+                "dispute_resolved_at": None,
+                "dispute_resolved_by": None,
+                "workflow_status": InvoiceWorkflowStatus.PAUSED,
+                "next_check_at": None,
+                "evaluation_lease_until": None,
+                "active_action_id": None if cancelled_action_id else invoice.active_action_id,
+                "updated_at": now,
+            }
+        )
+        return repo.update_invoice_with_event(
+            tenant,
+            disputed,
+            EvidenceEventType.DISPUTE_OPENED,
+            {
+                "reason": payload.reason.value,
+                "cancelled_action_id": cancelled_action_id,
+                "note_present": payload.note is not None,
+            },
+        )
+
+    @application.post(
+        "/api/invoices/{invoice_id}/disputes/resolve",
+        response_model=Invoice,
+        tags=["invoices"],
+    )
+    def resolve_dispute(
+        invoice_id: str,
+        payload: DisputeResolve,
+        user: UserDependency,
+        repo: RepositoryDependency,
+    ) -> Invoice:
+        tenant = repo.require_tenant(user)
+        require_membership_role(
+            tenant, MembershipRole.OWNER, MembershipRole.ADMIN, MembershipRole.OPERATOR
+        )
+        invoice = repo.get_invoice(tenant, invoice_id)
+        if not invoice.dispute_active:
+            raise ApiError(409, "dispute_not_active", "The invoice has no active dispute.")
+        now = datetime.now(UTC)
+        if payload.next_check_at <= now:
+            raise ApiError(422, "next_check_in_past", "The next check must be in the future.")
+        reopened = invoice.model_copy(
+            update={
+                "dispute_active": False,
+                "dispute_resolution_note": payload.resolution_note,
+                "dispute_resolved_at": now,
+                "dispute_resolved_by": tenant.user_id,
+                "workflow_status": InvoiceWorkflowStatus.OPEN,
+                "next_check_at": payload.next_check_at,
+                "evaluation_lease_until": None,
+                "updated_at": now,
+            }
+        )
+        return repo.update_invoice_with_event(
+            tenant,
+            reopened,
+            EvidenceEventType.DISPUTE_RESOLVED,
+            {
+                "next_check_at": payload.next_check_at.isoformat(),
+                "resolution_note_present": payload.resolution_note is not None,
+            },
         )
 
     @application.post(
@@ -774,6 +1079,9 @@ def create_app(
         repo: RepositoryDependency,
     ) -> EvaluationResult:
         tenant = repo.require_tenant(user)
+        require_membership_role(
+            tenant, MembershipRole.OWNER, MembershipRole.ADMIN, MembershipRole.OPERATOR
+        )
         enforce_rate_limit(repo, tenant.business_id, "invoice_evaluate", 20, 600)
         return await workflow_from(request).evaluate(tenant, invoice_id)
 
@@ -799,13 +1107,17 @@ def create_app(
     ) -> ActionPage:
         tenant = repo.require_tenant(user)
         actions, next_cursor = repo.list_all_actions(tenant, state, limit, cursor)
-        return ActionPage(items=actions, next_cursor=next_cursor)
+        return ActionPage(
+            items=[action_visible_to_role(action, tenant) for action in actions],
+            next_cursor=next_cursor,
+        )
 
     @application.post("/api/actions/{action_id}/approve", response_model=Action, tags=["actions"])
     async def approve_action(
         action_id: str, request: Request, user: UserDependency, repo: RepositoryDependency
     ) -> Action:
         tenant = repo.require_tenant(user)
+        require_membership_role(tenant, MembershipRole.OWNER, MembershipRole.ADMIN)
         enforce_rate_limit(repo, tenant.business_id, "action_mutation", 20, 600)
         return await workflow_from(request).approve(tenant, action_id)
 
@@ -818,6 +1130,9 @@ def create_app(
         repo: RepositoryDependency,
     ) -> Action:
         tenant = repo.require_tenant(user)
+        require_membership_role(
+            tenant, MembershipRole.OWNER, MembershipRole.ADMIN, MembershipRole.OPERATOR
+        )
         enforce_rate_limit(repo, tenant.business_id, "action_mutation", 20, 600)
         return workflow_from(request).cancel(tenant, action_id, payload)
 
@@ -826,6 +1141,7 @@ def create_app(
         action_id: str, request: Request, user: UserDependency, repo: RepositoryDependency
     ) -> Action:
         tenant = repo.require_tenant(user)
+        require_membership_role(tenant, MembershipRole.OWNER, MembershipRole.ADMIN)
         enforce_rate_limit(repo, tenant.business_id, "action_mutation", 20, 600)
         return await workflow_from(request).retry(tenant, action_id)
 
@@ -838,6 +1154,9 @@ def create_app(
         repo: RepositoryDependency,
     ) -> Action:
         tenant = repo.require_tenant(user)
+        require_membership_role(
+            tenant, MembershipRole.OWNER, MembershipRole.ADMIN, MembershipRole.OPERATOR
+        )
         enforce_rate_limit(repo, tenant.business_id, "action_mutation", 20, 600)
         return workflow_from(request).resolve(tenant, action_id, payload)
 
@@ -851,6 +1170,9 @@ def create_app(
         repo: RepositoryDependency,
     ) -> Payment:
         tenant = repo.require_tenant(user)
+        require_membership_role(
+            tenant, MembershipRole.OWNER, MembershipRole.ADMIN, MembershipRole.OPERATOR
+        )
         invoice = repo.get_invoice(tenant, invoice_id)
         if payload.currency != invoice.currency:
             raise ApiError(
@@ -888,6 +1210,73 @@ def create_app(
     def metrics(user: UserDependency, repo: RepositoryDependency) -> MetricsResponse:
         return calculate_metrics(repo, repo.require_tenant(user))
 
+    @application.get("/api/forecast", response_model=CashForecast, tags=["finance"])
+    def cash_forecast(user: UserDependency, repo: RepositoryDependency) -> CashForecast:
+        return build_cash_forecast(repo, repo.require_tenant(user))
+
+    @application.get("/api/finance-pack", tags=["finance"])
+    def finance_readiness_pack(user: UserDependency, repo: RepositoryDependency) -> Response:
+        tenant = repo.require_tenant(user)
+        require_membership_role(
+            tenant, MembershipRole.OWNER, MembershipRole.ADMIN, MembershipRole.ADVISOR
+        )
+        payload = build_finance_readiness_zip(repo, tenant)
+        return Response(
+            content=payload,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="cashsathi-finance-pack-{tenant.business_id}.zip"'
+                )
+            },
+        )
+
+    @application.get(
+        "/api/integrations/accounting",
+        response_model=AccountingIntegrationPage,
+        tags=["integrations"],
+    )
+    def accounting_integrations(
+        user: UserDependency, repo: RepositoryDependency
+    ) -> AccountingIntegrationPage:
+        tenant = repo.require_tenant(user)
+        require_membership_role(tenant, MembershipRole.OWNER, MembershipRole.ADMIN)
+        return accounting_integration_statuses()
+
+    @application.get(
+        "/api/integrations/accounting/{provider}/sync-status",
+        response_model=AccountingIntegrationStatus,
+        tags=["integrations"],
+    )
+    def accounting_sync_status(
+        provider: AccountingProvider,
+        user: UserDependency,
+        repo: RepositoryDependency,
+    ) -> AccountingIntegrationStatus:
+        tenant = repo.require_tenant(user)
+        require_membership_role(tenant, MembershipRole.OWNER, MembershipRole.ADMIN)
+        return next(
+            item for item in accounting_integration_statuses().items if item.provider == provider
+        )
+
+    @application.post(
+        "/api/integrations/accounting/{provider}/sync",
+        response_model=AccountingIntegrationStatus,
+        tags=["integrations"],
+    )
+    def sync_accounting_provider(
+        provider: AccountingProvider,
+        user: UserDependency,
+        repo: RepositoryDependency,
+    ) -> AccountingIntegrationStatus:
+        tenant = repo.require_tenant(user)
+        require_membership_role(tenant, MembershipRole.OWNER, MembershipRole.ADMIN)
+        raise ApiError(
+            409,
+            "accounting_integration_not_configured",
+            f"{provider.value} credentials and organization approval are not configured.",
+        )
+
     @application.get("/api/settings/automation", response_model=PolicyDefaults, tags=["settings"])
     def automation_settings(user: UserDependency, repo: RepositoryDependency) -> PolicyDefaults:
         return repo.get_policy_settings(repo.require_tenant(user))
@@ -896,7 +1285,80 @@ def create_app(
     def update_automation(
         payload: AutomationUpdate, user: UserDependency, repo: RepositoryDependency
     ) -> PolicyDefaults:
-        return repo.update_automation(repo.require_tenant(user), payload.enabled)
+        tenant = repo.require_tenant(user)
+        require_membership_role(tenant, MembershipRole.OWNER, MembershipRole.ADMIN)
+        return repo.update_automation(tenant, payload.enabled)
+
+    @application.patch("/api/settings/policy", response_model=PolicyDefaults, tags=["settings"])
+    def update_restrictive_policy(
+        payload: RestrictivePolicyUpdate,
+        user: UserDependency,
+        repo: RepositoryDependency,
+    ) -> PolicyDefaults:
+        tenant = repo.require_tenant(user)
+        require_membership_role(tenant, MembershipRole.OWNER, MembershipRole.ADMIN)
+        current = repo.get_policy_settings(tenant)
+        if (
+            payload.reminder_cooldown_hours is not None
+            and payload.reminder_cooldown_hours < current.reminder_cooldown_hours
+        ):
+            raise ApiError(422, "policy_less_restrictive", "Reminder cooldown cannot decrease.")
+        if (
+            payload.high_value_threshold_minor is not None
+            and payload.high_value_threshold_minor > current.high_value_threshold_minor
+        ):
+            raise ApiError(422, "policy_less_restrictive", "High-value threshold cannot increase.")
+        updated = current.model_copy(
+            update={
+                "reminder_cooldown_hours": (
+                    payload.reminder_cooldown_hours
+                    if payload.reminder_cooldown_hours is not None
+                    else current.reminder_cooldown_hours
+                ),
+                "high_value_threshold_minor": (
+                    payload.high_value_threshold_minor
+                    if payload.high_value_threshold_minor is not None
+                    else current.high_value_threshold_minor
+                ),
+            }
+        )
+        return repo.update_policy_settings(tenant, updated)
+
+    @application.get(
+        "/api/settings/policy/templates",
+        response_model=PolicyTemplatePage,
+        tags=["settings"],
+    )
+    def policy_templates(user: UserDependency, repo: RepositoryDependency) -> PolicyTemplatePage:
+        tenant = repo.require_tenant(user)
+        return restrictive_policy_templates(repo.get_policy_settings(tenant))
+
+    @application.post(
+        "/api/settings/policy/templates/{template}/apply",
+        response_model=PolicyDefaults,
+        tags=["settings"],
+    )
+    def apply_policy_template(
+        template: PolicyTemplateKind,
+        _payload: PolicyTemplateApply,
+        user: UserDependency,
+        repo: RepositoryDependency,
+    ) -> PolicyDefaults:
+        tenant = repo.require_tenant(user)
+        require_membership_role(tenant, MembershipRole.OWNER, MembershipRole.ADMIN)
+        selected = next(
+            item
+            for item in restrictive_policy_templates(repo.get_policy_settings(tenant)).items
+            if item.template == template
+        )
+        current = repo.get_policy_settings(tenant)
+        updated = current.model_copy(
+            update={
+                "reminder_cooldown_hours": selected.reminder_cooldown_hours,
+                "high_value_threshold_minor": selected.high_value_threshold_minor,
+            }
+        )
+        return repo.update_policy_settings(tenant, updated)
 
     @application.get(
         "/api/integrations/gmail/status", response_model=GmailStatus, tags=["integrations"]
@@ -924,6 +1386,7 @@ def create_app(
         request: Request, user: UserDependency, repo: RepositoryDependency
     ) -> GmailConnectResponse:
         tenant = repo.require_tenant(user)
+        require_membership_role(tenant, MembershipRole.OWNER, MembershipRole.ADMIN)
         enforce_rate_limit(repo, tenant.user_id, "gmail_connect", 5, 3600)
         adapter: GmailAdapter | None = request.app.state.gmail_adapter
         if adapter is None or request.app.state.token_cipher is None:
@@ -988,6 +1451,7 @@ def create_app(
     @application.post("/api/integrations/gmail/disconnect", tags=["integrations"])
     def disconnect_gmail(user: UserDependency, repo: RepositoryDependency) -> GmailStatus:
         tenant = repo.require_tenant(user)
+        require_membership_role(tenant, MembershipRole.OWNER, MembershipRole.ADMIN)
         repo.disconnect_gmail(tenant)
         repo.update_automation(tenant, False)
         return GmailStatus(connected=False, automation_enabled=False)

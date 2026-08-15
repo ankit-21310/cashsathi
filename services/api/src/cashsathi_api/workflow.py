@@ -80,10 +80,13 @@ class CollectionWorkflow:
         invoice = self._repo.get_invoice(tenant, invoice_id)
         actions = self._repo.list_actions(tenant, invoice.id)
         state = calculate_invoice_state(invoice, actions)
+        policy_settings = self._repo.get_policy_settings(tenant)
         run_id = f"run_{uuid4().hex}"
         created_at = datetime.now(UTC)
         try:
-            output = await run_in_threadpool(self._decision.decide, invoice, state, actions)
+            output = await run_in_threadpool(
+                self._decision.decide, invoice, state, actions, policy_settings
+            )
         except DecisionSchemaFailure as failure:
             structlog.get_logger("gemini").warning(
                 "decision_schema_failure", category="schema_or_model_failure"
@@ -156,11 +159,31 @@ class CollectionWorkflow:
                 "Agent decisioning is temporarily unavailable. No action was created.",
             ) from None
 
+        proposal_run = AgentRun(
+            id=run_id,
+            invoice_id=invoice.id,
+            business_id=tenant.business_id,
+            status=AgentRunStatus.PROPOSED,
+            invoice_state=state,
+            model_proposal=output.proposal,
+            policy_result=None,
+            model_id=self._decision.model_id,
+            prompt_version=self._decision.prompt_version,
+            attempt_count=output.attempt_count,
+            latency_ms=output.latency_ms,
+            input_tokens=output.input_tokens,
+            output_tokens=output.output_tokens,
+            created_at=created_at,
+            function_call_id=output.function_call_id,
+            proposed_function=output.proposed_function,
+            function_arguments=output.function_arguments,
+        )
+        self._repo.save_agent_proposal(tenant, proposal_run)
         policy_result = evaluate_policy(
             invoice=invoice,
             invoice_state=state,
             proposal=output.proposal,
-            settings=self._repo.get_policy_settings(tenant),
+            settings=policy_settings,
             actions=actions,
             policy_version=self._settings.policy_version,
         )
@@ -185,6 +208,9 @@ class CollectionWorkflow:
             output_tokens=output.output_tokens,
             created_at=created_at,
             action_id=action.id if action else None,
+            function_call_id=output.function_call_id,
+            proposed_function=output.proposed_function,
+            function_arguments=output.function_arguments,
         )
         stored_action = self._repo.save_evaluation(tenant, run, action)
         if stored_action:
@@ -248,6 +274,8 @@ class CollectionWorkflow:
                 body=message.body,
                 automatic=automatic,
                 reminder_sequence=sequence,
+                locale=message.locale,
+                template_version=message.template_version,
             ),
             policy,
         )

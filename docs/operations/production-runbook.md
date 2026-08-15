@@ -5,7 +5,7 @@ This runbook covers the Phase 6–8 repository release. Cloud deployment, genuin
 ## Release order
 
 1. Authenticate `gcloud`, Firebase, and application-default credentials; verify the intended project.
-2. Run `infra/gcp/bootstrap.ps1`. For an existing database, run the Phase 4 and Phase 6–7 backfills first without `--apply`, inspect the counts, then repeat with `--apply`.
+2. Run `infra/gcp/bootstrap.ps1`. For an existing database, run the Phase 4, Phase 6–7, and Phase 9 backfills first without `--apply`, inspect the counts, then repeat with `--apply`.
 3. Deploy Firestore rules and indexes. Confirm TTL is enabled for `_rate_limits.expires_at`; application logic still treats expired windows as expired because TTL deletion is asynchronous.
 4. Run `infra/gcp/configure-observability.ps1` **before** smoke events. User-defined log metrics do not backfill.
 5. Deploy with strict readiness enabled and exact HTTPS web/API/OAuth origins, Gmail/KMS secrets, scheduler identity/audience, and at least one administrator UID.

@@ -6,6 +6,7 @@ __pycache__/
 
 # Framework and test output
 .next/
+.next-e2e/
 out/
 coverage/
 htmlcov/
@@ -25,6 +26,7 @@ playwright-report/
 !.env.test
 *.local
 *service-account*.json
+client_secret*.json
 application_default_credentials.json
 
 # Editors and operating systems

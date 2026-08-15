@@ -92,6 +92,18 @@ def calculate_metrics(repo: Repository, tenant: TenantContext | None = None) -> 
 
     successful = [action for action in actions if action.state == ActionState.SUCCEEDED]
     automatic = [action for action in successful if action.automatic]
+    customer_counts: dict[str, int] = defaultdict(int)
+    for invoice in invoices:
+        customer_counts[invoice.customer.id] += 1
+    reconciliation_lags = [
+        max((payment.created_at - payment.paid_at).total_seconds() / 86400, 0)
+        for payment in payments
+    ]
+    delivery_outcomes = [
+        action
+        for action in actions
+        if action.state in {ActionState.SUCCEEDED, ActionState.FAILED, ActionState.UNKNOWN}
+    ]
     return MetricsResponse(
         currencies=[
             CurrencyMetrics(currency=currency, **values)
@@ -109,6 +121,24 @@ def calculate_metrics(repo: Repository, tenant: TenantContext | None = None) -> 
         ),
         pending_approvals=sum(
             1 for action in actions if action.state == ActionState.AWAITING_APPROVAL
+        ),
+        repeat_customer_count=sum(1 for count in customer_counts.values() if count >= 2),
+        reconciliation_lag_days=(
+            round(sum(reconciliation_lags) / len(reconciliation_lags), 2)
+            if reconciliation_lags
+            else 0
+        ),
+        exception_rate=(
+            round(
+                sum(1 for invoice in invoices if invoice.review_required or invoice.dispute_active)
+                / len(invoices),
+                4,
+            )
+            if invoices
+            else 0
+        ),
+        gmail_delivery_rate=(
+            round(len(successful) / len(delivery_outcomes), 4) if delivery_outcomes else 0
         ),
     )
 

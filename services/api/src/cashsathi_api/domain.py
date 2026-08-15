@@ -8,10 +8,21 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, mo
 
 class MembershipRole(StrEnum):
     OWNER = "OWNER"
+    ADMIN = "ADMIN"
+    OPERATOR = "OPERATOR"
+    ADVISOR = "ADVISOR"
 
 
 class MembershipStatus(StrEnum):
     ACTIVE = "ACTIVE"
+    REVOKED = "REVOKED"
+
+
+class TeamInvitationStatus(StrEnum):
+    PENDING = "PENDING"
+    ACCEPTED = "ACCEPTED"
+    REVOKED = "REVOKED"
+    EXPIRED = "EXPIRED"
 
 
 class EvidenceEventType(StrEnum):
@@ -38,6 +49,15 @@ class EvidenceEventType(StrEnum):
     PROSPECT_UPDATED = "validation.prospect_updated"
     INTERVIEW_RECORDED = "validation.interview_recorded"
     ACCOUNT_DELETED = "privacy.account_deleted"
+    POLICY_CHANGED = "policy.changed"
+    CUSTOMER_POLICY_CHANGED = "customer.policy_changed"
+    DISPUTE_OPENED = "invoice.dispute_opened"
+    DISPUTE_RESOLVED = "invoice.dispute_resolved"
+    TEAM_INVITATION_CREATED = "team.invitation_created"
+    TEAM_INVITATION_ACCEPTED = "team.invitation_accepted"
+    TEAM_INVITATION_REVOKED = "team.invitation_revoked"
+    MEMBERSHIP_ROLE_CHANGED = "team.membership_role_changed"
+    MEMBERSHIP_REVOKED = "team.membership_revoked"
 
 
 class InvoiceState(StrEnum):
@@ -110,6 +130,19 @@ class ReminderIntent(StrEnum):
     OVERDUE_FOLLOWUP = "OVERDUE_FOLLOWUP"
 
 
+class ReminderLocale(StrEnum):
+    EN_IN = "en-IN"
+    HI_IN = "hi-IN"
+
+
+class DisputeReason(StrEnum):
+    INVOICE_ERROR = "INVOICE_ERROR"
+    SERVICE_ISSUE = "SERVICE_ISSUE"
+    PAYMENT_CLAIM = "PAYMENT_CLAIM"
+    TERMS_DISAGREEMENT = "TERMS_DISAGREEMENT"
+    OTHER = "OTHER"
+
+
 class ActionResolution(StrEnum):
     CONFIRMED_DELIVERED = "CONFIRMED_DELIVERED"
     CONFIRMED_NOT_DELIVERED = "CONFIRMED_NOT_DELIVERED"
@@ -180,6 +213,42 @@ class PolicyDefaults(BaseModel):
     automation_enabled: bool = False
 
 
+class RestrictivePolicyUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reminder_cooldown_hours: int | None = Field(default=None, ge=72, le=720)
+    high_value_threshold_minor: int | None = Field(default=None, ge=0, le=5_000_000)
+    confirmed: Literal[True]
+
+    @model_validator(mode="after")
+    def includes_a_change(self) -> "RestrictivePolicyUpdate":
+        if self.reminder_cooldown_hours is None and self.high_value_threshold_minor is None:
+            raise ValueError("At least one restrictive policy value is required")
+        return self
+
+
+class PolicyTemplateKind(StrEnum):
+    AGENCY = "AGENCY"
+    CONSULTANT = "CONSULTANT"
+    MANUFACTURER = "MANUFACTURER"
+
+
+class PolicyTemplateApply(BaseModel):
+    confirmed: Literal[True]
+
+
+class PolicyTemplateSummary(BaseModel):
+    template: PolicyTemplateKind
+    label: str
+    reminder_cooldown_hours: int
+    high_value_threshold_minor: int
+    hard_stops_immutable: Literal[True] = True
+
+
+class PolicyTemplatePage(BaseModel):
+    items: list[PolicyTemplateSummary]
+
+
 class BusinessCreate(BaseModel):
     name: str = Field(min_length=2, max_length=100)
 
@@ -200,6 +269,56 @@ class Membership(BaseModel):
     role: MembershipRole
     status: MembershipStatus
     created_at: datetime
+
+
+class TeamInvitationCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: EmailStr
+    role: Literal[MembershipRole.ADMIN, MembershipRole.OPERATOR, MembershipRole.ADVISOR]
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def normalize_email(cls, value: object) -> object:
+        return value.strip().casefold() if isinstance(value, str) else value
+
+
+class TeamInvitation(BaseModel):
+    id: str
+    business_id: str
+    email: EmailStr
+    role: MembershipRole
+    status: TeamInvitationStatus
+    invited_by: str
+    created_at: datetime
+    expires_at: datetime
+    accepted_by: str | None = None
+    accepted_at: datetime | None = None
+    revoked_by: str | None = None
+    revoked_at: datetime | None = None
+
+
+class TeamInvitationPage(BaseModel):
+    items: list[TeamInvitation]
+
+
+class MembershipPage(BaseModel):
+    items: list[Membership]
+
+
+class MembershipRoleUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: Literal[MembershipRole.ADMIN, MembershipRole.OPERATOR, MembershipRole.ADVISOR]
+    confirmed: Literal[True]
+
+
+class MembershipRevoke(BaseModel):
+    confirmed: Literal[True]
+
+
+class InvitationRevoke(BaseModel):
+    confirmed: Literal[True]
 
 
 class MeResponse(BaseModel):
@@ -367,6 +486,58 @@ class CustomerSnapshot(BaseModel):
     name: str
     email: str | None
     manual_only: bool
+    locale: ReminderLocale = ReminderLocale.EN_IN
+
+
+class CustomerPolicyUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    manual_only: bool | None = None
+    locale: ReminderLocale | None = None
+    confirmed: Literal[True]
+
+    @model_validator(mode="after")
+    def includes_a_change(self) -> "CustomerPolicyUpdate":
+        if self.manual_only is None and self.locale is None:
+            raise ValueError("At least one customer setting is required")
+        return self
+
+
+class DisputeCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: DisputeReason
+    note: str | None = Field(default=None, max_length=1000)
+    confirmed: Literal[True]
+
+    @field_validator("note", mode="before")
+    @classmethod
+    def empty_note_is_none(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
+
+
+class DisputeResolve(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    resolution_note: str | None = Field(default=None, max_length=1000)
+    next_check_at: datetime
+    confirmed: Literal[True]
+
+    @field_validator("resolution_note", mode="before")
+    @classmethod
+    def empty_resolution_note_is_none(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
+
+    @field_validator("next_check_at")
+    @classmethod
+    def next_check_must_be_utc_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("next_check_at must include a timezone")
+        return value.astimezone(UTC)
 
 
 class Invoice(BaseModel):
@@ -383,6 +554,13 @@ class Invoice(BaseModel):
     review_required: bool
     review_reason: str | None
     dispute_active: bool = False
+    dispute_reason: DisputeReason | None = None
+    dispute_note: str | None = None
+    dispute_opened_at: datetime | None = None
+    dispute_opened_by: str | None = None
+    dispute_resolution_note: str | None = None
+    dispute_resolved_at: datetime | None = None
+    dispute_resolved_by: str | None = None
     verified_paid_minor: int = 0
     confirmation_hash: str
     created_at: datetime
@@ -477,6 +655,8 @@ class Action(BaseModel):
     resolved_at: datetime | None = None
     attempt_count: int = Field(default=0, ge=0)
     reminder_sequence: int = Field(default=0, ge=0)
+    locale: ReminderLocale = ReminderLocale.EN_IN
+    template_version: str = "reminder-en-in-v1"
 
 
 class ActionPage(BaseModel):
@@ -507,6 +687,7 @@ class ActionAttempt(BaseModel):
 
 
 class AgentRunStatus(StrEnum):
+    PROPOSED = "PROPOSED"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     HUMAN_REVIEW = "HUMAN_REVIEW"
@@ -529,6 +710,9 @@ class AgentRun(BaseModel):
     failure_code: str | None = None
     created_at: datetime
     action_id: str | None = None
+    function_call_id: str | None = None
+    proposed_function: str | None = None
+    function_arguments: dict[str, Any] | None = None
 
 
 class AgentRunPage(BaseModel):
@@ -650,6 +834,59 @@ class MetricsResponse(BaseModel):
     automation_rate: float
     average_days_overdue: float
     pending_approvals: int
+    repeat_customer_count: int = 0
+    reconciliation_lag_days: float = 0
+    exception_rate: float = 0
+    gmail_delivery_rate: float = 0
+    renewal_intent: str | None = None
+
+
+class ForecastBucket(BaseModel):
+    starts_on: date
+    ends_on: date
+    expected_inflow_by_currency: dict[str, int]
+    invoice_count: int
+
+
+class ForecastHorizon(BaseModel):
+    weeks: Literal[4, 8, 12]
+    expected_inflow_by_currency: dict[str, int]
+    buckets: list[ForecastBucket]
+
+
+class CashForecast(BaseModel):
+    generated_at: datetime
+    methodology_version: str
+    observed_payment_delay_days: int
+    horizons: list[ForecastHorizon]
+
+
+class AccountingProvider(StrEnum):
+    ZOHO_BOOKS = "ZOHO_BOOKS"
+    TALLY_PRIME = "TALLY_PRIME"
+
+
+class AccountingConnectionState(StrEnum):
+    NOT_CONFIGURED = "NOT_CONFIGURED"
+    CONNECTED = "CONNECTED"
+    ERROR = "ERROR"
+
+
+class AccountingIntegrationStatus(BaseModel):
+    provider: AccountingProvider
+    state: AccountingConnectionState = AccountingConnectionState.NOT_CONFIGURED
+    organization_external_id: str | None = None
+    last_sync_at: datetime | None = None
+    last_cursor: str | None = None
+    imported_customers: int = 0
+    imported_invoices: int = 0
+    imported_payments: int = 0
+    last_error_code: str | None = None
+    credentials_encrypted: bool = False
+
+
+class AccountingIntegrationPage(BaseModel):
+    items: list[AccountingIntegrationStatus]
 
 
 class ProspectCreate(BaseModel):

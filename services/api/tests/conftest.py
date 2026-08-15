@@ -60,7 +60,10 @@ class TestDecisionAdapter:
     model_id = "test-gemini"
     prompt_version = "test-decision-v1"
 
-    def decide(self, _invoice: object, _state: object, _actions: object) -> DecisionOutput:
+    def decide(
+        self, invoice: object, _state: object, _actions: object, _policy: object
+    ) -> DecisionOutput:
+        invoice_id = str(getattr(invoice, "id", "test-invoice"))
         return DecisionOutput(
             proposal=ModelDecision(
                 decision=AgentDecision.SEND_REMINDER,
@@ -70,6 +73,14 @@ class TestDecisionAdapter:
             latency_ms=30,
             input_tokens=80,
             output_tokens=20,
+            function_call_id=f"test-call-{invoice_id}",
+            proposed_function="send_payment_reminder",
+            function_arguments={
+                "invoice_id": invoice_id,
+                "tone": "WARM",
+                "intent": "OVERDUE_FOLLOWUP",
+                "risk_flags": [],
+            },
         )
 
 
