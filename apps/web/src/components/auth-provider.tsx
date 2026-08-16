@@ -13,12 +13,14 @@ import {
   createUserWithEmailAndPassword,
   GoogleAuthProvider,
   onIdTokenChanged,
+  sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signInWithPopup,
   signOut as firebaseSignOut,
   User,
 } from "firebase/auth";
 
+import { getPublicEnvironment } from "@/lib/env";
 import { getFirebaseAuth } from "@/lib/firebase";
 
 interface AuthContextValue {
@@ -28,10 +30,20 @@ interface AuthContextValue {
   signInWithGoogle: () => Promise<void>;
   signInWithEmail: (email: string, password: string) => Promise<void>;
   createEmailAccount: (email: string, password: string) => Promise<void>;
+  sendPasswordReset: (email: string) => Promise<void>;
   signOut: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
+
+function isMissingResetAccountError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "auth/user-not-found"
+  );
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
@@ -65,6 +77,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const createEmailAccount = useCallback(async (email: string, password: string) => {
     await createUserWithEmailAndPassword(getFirebaseAuth(), email, password);
   }, []);
+  const sendPasswordReset = useCallback(async (email: string) => {
+    const environment = getPublicEnvironment();
+    try {
+      await sendPasswordResetEmail(getFirebaseAuth(), email);
+    } catch (error) {
+      if (!isMissingResetAccountError(error) || environment.useFirebaseEmulator) throw error;
+    }
+  }, []);
   const signOut = useCallback(async () => firebaseSignOut(getFirebaseAuth()), []);
 
   const value = useMemo(
@@ -75,6 +95,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       signInWithGoogle,
       signInWithEmail,
       createEmailAccount,
+      sendPasswordReset,
       signOut,
     }),
     [
@@ -84,6 +105,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       signInWithGoogle,
       signInWithEmail,
       createEmailAccount,
+      sendPasswordReset,
       signOut,
     ],
   );

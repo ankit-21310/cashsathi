@@ -74,6 +74,11 @@ a { color: inherit; text-decoration: none; }
 .divider { display: flex; align-items: center; color: #8a958f; font-size: .78rem; margin: 24px 0; }
 .divider::before, .divider::after { content: ""; height: 1px; background: var(--line); flex: 1; }
 .divider span { padding: 0 12px; }
+.auth-form-actions { display: flex; justify-content: flex-end; margin-top: -6px; }
+.link-button { width: fit-content; padding: 0; border: 0; background: transparent; color: var(--green); cursor: pointer; font: inherit; font-size: .87rem; font-weight: 680; }
+.link-button:hover { text-decoration: underline; }
+.link-button:focus-visible { outline: 3px solid rgba(19,79,60,.18); outline-offset: 3px; border-radius: 2px; }
+.auth-back-link { justify-self: center; }
 form { display: grid; gap: 18px; }
 label { display: grid; gap: 8px; font-size: .87rem; font-weight: 680; }
 input, select, textarea { width: 100%; border: 1px solid #ccd4ce; background: white; min-height: 48px; padding: 0 14px; border-radius: 11px; outline: none; }
@@ -205,13 +210,13 @@ input:focus, select:focus, textarea:focus { border-color: var(--green); box-shad
 .currency-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
 .admin-grid { display: grid; grid-template-columns: 1.2fr .8fr; gap: 18px; margin-bottom: 20px; }
 .consent-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: stretch; gap: 18px; margin: 20px 0; }
-.consent-card { display: grid; grid-template-rows: auto auto auto 1fr auto; align-content: start; gap: 14px; min-width: 0; padding: 24px; }
-.consent-card h2, .consent-card p { margin: 0; }
-.consent-card h2 { font-size: 1.2rem; line-height: 1.25; }
-.consent-card > p { color: var(--muted); line-height: 1.55; }
-.consent-card label { align-self: end; min-width: 0; }
-.consent-card textarea { min-height: 104px; }
-.consent-card > .button { width: 100%; margin-top: 0; align-self: end; }
+.optional-consent-card { display: grid; grid-template-rows: auto auto auto 1fr auto; align-content: start; gap: 14px; min-width: 0; padding: 24px; }
+.optional-consent-card h2, .optional-consent-card p { margin: 0; }
+.optional-consent-card h2 { font-size: 1.2rem; line-height: 1.25; }
+.optional-consent-card > p { color: var(--muted); line-height: 1.55; }
+.optional-consent-card label { align-self: end; min-width: 0; }
+.optional-consent-card textarea { min-height: 104px; }
+.optional-consent-card > .button { width: 100%; margin-top: 0; align-self: end; }
 .pricing-panel { display: grid; grid-template-columns: 1.25fr .75fr; gap: 42px; padding: 38px; margin: 30px 0 72px; background: #f2f4ef; border: 1px solid var(--line); border-radius: 24px; }
 .pricing-panel h2 { font-size: 2.4rem; margin: 8px 0; }
 .pricing-panel p { color: var(--muted); line-height: 1.6; }

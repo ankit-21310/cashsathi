@@ -115,7 +115,7 @@ test.describe("fresh browser owner journey", () => {
     await expect(page).toHaveURL(/\/dashboard$/);
     await page.goto("/privacy");
 
-    const cards = page.locator(".consent-card");
+    const cards = page.locator(".optional-consent-card");
     await expect(cards).toHaveCount(3);
     for (let index = 0; index < 3; index += 1) {
       const cardBox = await cards.nth(index).boundingBox();
