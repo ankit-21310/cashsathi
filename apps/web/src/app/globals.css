@@ -272,7 +272,6 @@ input:focus, select:focus, textarea:focus { border-color: var(--green); box-shad
   .app-header-inner > .brand { grid-column: 1; grid-row: 1; }
   .nav-toggle { display: inline-flex; grid-column: 3; grid-row: 1; }
   .user-actions { grid-column: 2; grid-row: 1; }
-  .user-email { display: none; }
   .app-navigation { display: none; grid-column: 1 / -1; grid-row: 2; grid-template-columns: repeat(4, minmax(0, 1fr)); width: 100%; padding-top: 12px; border-top: 1px solid var(--line); }
   .app-navigation.open { display: grid; }
   .app-navigation a { padding: 11px 12px; border-radius: 9px; background: #f4f5f0; text-align: center; }
@@ -287,7 +286,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--green); box-shad
 @media (max-width: 900px) {
   .workflow-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .workflow-grid article:nth-child(2) { border-right: 0; }
-  .safety-panel, .auth-page, .admin-grid, .safety-controls, .detail-grid { grid-template-columns: 1fr; }
+  .safety-panel, .auth-page, .safety-controls, .detail-grid { grid-template-columns: 1fr; }
   .auth-aside { min-height: 400px; }
   .validation-row { grid-template-columns: 1fr; align-items: stretch; }
 }

@@ -15,6 +15,7 @@ export function AuthenticatedShell({ children }: { children: ReactNode }) {
   const [account, setAccount] = useState<MeResponse | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const navRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     if (!loading && !user) router.replace("/login");
@@ -35,8 +36,18 @@ export function AuthenticatedShell({ children }: { children: ReactNode }) {
       }
     }
 
+    function closeOnOutsideClick(event: MouseEvent) {
+      const target = event.target as Node;
+      if (navRef.current?.contains(target) || menuButtonRef.current?.contains(target)) return;
+      setMenuOpen(false);
+    }
+
     window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
+    document.addEventListener("mousedown", closeOnOutsideClick);
+    return () => {
+      window.removeEventListener("keydown", closeOnEscape);
+      document.removeEventListener("mousedown", closeOnOutsideClick);
+    };
   }, [menuOpen]);
 
   if (loading || !user) return <main className="centered-state">Checking your secure session…</main>;
@@ -58,6 +69,7 @@ export function AuthenticatedShell({ children }: { children: ReactNode }) {
           </button>
           <nav
             id="app-navigation"
+            ref={navRef}
             className={`app-navigation${menuOpen ? " open" : ""}`}
             aria-label="Primary navigation"
           >
