@@ -25,11 +25,12 @@ export default function LoginPage() {
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const submittedMode = mode;
     setError(null);
     setSuccess(null);
     setSubmitting(true);
     try {
-      if (mode === "reset") {
+      if (submittedMode === "reset") {
         await auth.sendPasswordReset(email.trim());
         setSuccess(
           usingFirebaseEmulator
@@ -38,12 +39,12 @@ export default function LoginPage() {
         );
         return;
       }
-      if (mode === "signin") await auth.signInWithEmail(email, password);
+      if (submittedMode === "signin") await auth.signInWithEmail(email, password);
       else await auth.createEmailAccount(email, password);
       router.replace("/onboarding");
     } catch {
       setError(
-        mode === "reset"
+        submittedMode === "reset"
           ? usingFirebaseEmulator
             ? "No local reset link was created. Make sure this email is registered in the Auth emulator."
             : "We couldn't send a reset link. Please try again in a moment."
@@ -75,8 +76,8 @@ export default function LoginPage() {
       <section className="auth-card-wrap">
         <div className="auth-card">
           <div className="tab-list" role="tablist">
-            <button className={mode === "signin" ? "active" : ""} onClick={() => changeMode("signin")}>Sign in</button>
-            <button className={mode === "create" ? "active" : ""} onClick={() => changeMode("create")}>Create account</button>
+            <button className={mode === "signin" ? "active" : ""} disabled={submitting} onClick={() => changeMode("signin")}>Sign in</button>
+            <button className={mode === "create" ? "active" : ""} disabled={submitting} onClick={() => changeMode("create")}>Create account</button>
           </div>
           <h2>
             {mode === "signin"
@@ -125,7 +126,7 @@ export default function LoginPage() {
             )}
             {mode === "signin" && (
               <div className="auth-form-actions">
-                <button className="link-button" type="button" onClick={() => changeMode("reset")}>Forgot password?</button>
+                <button className="link-button" type="button" disabled={submitting} onClick={() => changeMode("reset")}>Forgot password?</button>
               </div>
             )}
             <button className="button button-primary full-width" disabled={submitting || Boolean(auth.configurationError)}>
@@ -138,7 +139,7 @@ export default function LoginPage() {
                     : "Send reset link"}
             </button>
             {mode === "reset" && (
-              <button className="link-button auth-back-link" type="button" onClick={() => changeMode("signin")}>Back to sign in</button>
+              <button className="link-button auth-back-link" type="button" disabled={submitting} onClick={() => changeMode("signin")}>Back to sign in</button>
             )}
           </form>
         </div>
