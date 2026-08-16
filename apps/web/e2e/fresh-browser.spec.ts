@@ -14,6 +14,7 @@ test.describe("fresh browser owner journey", () => {
     await expect(page).toHaveURL(/\/dashboard$/);
     await expect(page.getByRole("heading", { name: "Aster Studio" })).toBeVisible();
 
+    await page.getByRole("button", { name: /Account menu for/ }).click();
     await page.getByRole("button", { name: "Sign out" }).click();
     await expect(page).toHaveURL(/\/login$/);
     await page.getByLabel("Email").fill("owner-a@example.test");
@@ -37,7 +38,8 @@ test.describe("fresh browser owner journey", () => {
     await expect(page).toHaveURL(/\/dashboard$/);
     await expect(page.getByText("Unclassified data", { exact: false }).first()).toBeVisible();
 
-    await page.getByRole("link", { name: "Gmail", exact: true }).click();
+    await page.getByRole("button", { name: "More" }).click();
+    await page.getByRole("link", { name: "Gmail integration", exact: true }).click();
     await page.getByRole("button", { name: "Connect Gmail" }).click();
     await expect(page).toHaveURL(/\/integrations\/gmail\?status=connected$/);
     await expect(page.getByText("Gmail connected", { exact: true })).toBeVisible();
@@ -88,6 +90,7 @@ test.describe("fresh browser owner journey", () => {
     await page.getByLabel("Password").fill("DemoPass!123");
     await page.locator("form").getByRole("button", { name: "Sign in", exact: true }).click();
     await expect(page).toHaveURL(/\/dashboard$/);
+    await page.getByRole("button", { name: "More" }).click();
     await page.getByRole("link", { name: "Admin", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Platform impact" })).toBeVisible();
     await page.getByRole("link", { name: "Validation workspace" }).click();

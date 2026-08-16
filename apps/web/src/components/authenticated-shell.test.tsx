@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: mocks.replace }),
+  usePathname: () => "/dashboard",
 }));
 
 vi.mock("next/link", () => ({
@@ -91,8 +92,26 @@ describe("authenticated navigation", () => {
 
     await screen.findByRole("link", { name: "Admin" });
     fireEvent.click(screen.getByRole("button", { name: "Menu" }));
+    fireEvent.click(screen.getByRole("button", { name: "More" }));
     fireEvent.click(screen.getByRole("link", { name: "Privacy" }));
 
     expect(screen.getByRole("button", { name: "Menu" })).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("groups secondary destinations and account actions into menus", async () => {
+    render(<AuthenticatedShell><div>Page content</div></AuthenticatedShell>);
+
+    await screen.findByRole("link", { name: "Admin" });
+    const moreButton = screen.getByRole("button", { name: "More" });
+    expect(moreButton).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(moreButton);
+    expect(moreButton).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("Workspace")).toBeInTheDocument();
+
+    const accountButton = screen.getByRole("button", { name: "Account menu for owner@example.test" });
+    fireEvent.click(accountButton);
+    expect(accountButton).toHaveAttribute("aria-expanded", "true");
+    expect(moreButton).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
   });
 });
