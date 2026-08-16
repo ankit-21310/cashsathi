@@ -630,6 +630,7 @@ class PolicyResult(BaseModel):
 class Action(BaseModel):
     id: str
     invoice_id: str
+    business_id: str = ""
     agent_run_id: str
     action_type: Literal["SEND_REMINDER"] = "SEND_REMINDER"
     state: ActionState

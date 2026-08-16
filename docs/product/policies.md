@@ -15,4 +15,4 @@ These defaults are enforced by application code after any model decision. Owners
 
 Money is always stored as integer minor units plus an ISO 4217 currency code. Dates are stored as typed timestamps or ISO dates; user-facing presentation defaults to Asia/Kolkata.
 
-Policy outcomes and the rule version must be persisted before tool execution. Actions and agent runs are append-oriented; corrections create new records rather than rewriting production evidence.
+Policy outcomes and the rule version must be persisted before tool execution. The `evidence_events` collection is the immutable audit ledger: every state transition of an action or agent run is recorded there as a create-only event and is never rewritten. The `agent_runs` and `actions` collections themselves are mutable current-status projections (updated in place as a run or action progresses); reconstruct history from `evidence_events`, not from these two collections.

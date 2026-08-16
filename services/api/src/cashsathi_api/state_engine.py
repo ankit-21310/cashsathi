@@ -7,7 +7,10 @@ KOLKATA = ZoneInfo("Asia/Kolkata")
 
 
 def calculate_invoice_state(
-    invoice: Invoice, actions: list[Action] | None = None, now: datetime | None = None
+    invoice: Invoice,
+    actions: list[Action] | None = None,
+    now: datetime | None = None,
+    cooldown_hours: int = 72,
 ) -> InvoiceState:
     current = now or datetime.now(UTC)
     if invoice.verified_paid_minor >= invoice.amount_minor:
@@ -20,7 +23,7 @@ def calculate_invoice_state(
     waiting = any(
         action.state in {ActionState.SUCCEEDED, ActionState.UNKNOWN}
         and (current - (action.execution_completed_at or action.created_at)).total_seconds()
-        < 72 * 3600
+        < cooldown_hours * 3600
         for action in recent
     )
     if waiting:

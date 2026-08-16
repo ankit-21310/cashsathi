@@ -38,7 +38,7 @@ export default function ActivityPage() {
         {error && <div className="alert alert-error">{error}</div>}
         <section className="foundation-panel">
           <div className="panel-heading"><div><h2>Chronological runs</h2></div><span>{runs?.items.length ?? 0} shown</span></div>
-          {!runs?.items.length ? <div className="empty-panel"><strong>No agent runs yet</strong><p>Evaluate an invoice to create the first auditable decision.</p></div> : (
+          {!runs ? <div className="empty-panel"><strong>Loading agent activity…</strong></div> : runs.items.length === 0 ? <div className="empty-panel"><strong>No agent runs yet</strong><p>Evaluate an invoice to create the first auditable decision.</p></div> : (
             <div className="activity-list">{runs.items.map((run) => (
               <Link href={`/invoices/${run.invoice_id}`} className="activity-row" key={run.id}>
                 <span className={`state-badge state-${run.status.toLowerCase()}`}>{humanize(run.status)}</span>

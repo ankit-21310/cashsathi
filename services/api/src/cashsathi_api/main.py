@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import secrets
+from collections import defaultdict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -276,9 +277,9 @@ def _confirmation_hash(payload: InvoiceConfirm, amount_minor: int) -> str:
     return hashlib.sha256(encoded.encode()).hexdigest()
 
 
-def _invoice_summary(repo: Repository, tenant: TenantContext, invoice: Invoice) -> InvoiceSummary:
-    # TenantContext is intentionally carried by repository APIs and never supplied by the client.
-    actions = repo.list_actions(tenant, invoice.id)
+def _invoice_summary(
+    invoice: Invoice, actions: list[Action], cooldown_hours: int
+) -> InvoiceSummary:
     return InvoiceSummary(
         id=invoice.id,
         invoice_number=invoice.invoice_number,
@@ -286,7 +287,7 @@ def _invoice_summary(repo: Repository, tenant: TenantContext, invoice: Invoice) 
         amount_minor=invoice.amount_minor,
         currency=invoice.currency,
         due_date=invoice.due_date,
-        current_state=calculate_invoice_state(invoice, actions),
+        current_state=calculate_invoice_state(invoice, actions, cooldown_hours=cooldown_hours),
         created_at=invoice.created_at,
     )
 
@@ -915,8 +916,19 @@ def create_app(
     ) -> InvoicePage:
         tenant = repo.require_tenant(user)
         invoices, next_cursor = repo.list_invoices(tenant, limit, cursor)
+        settings = repo.get_policy_settings(tenant)
+        actions_by_invoice: dict[str, list[Action]] = defaultdict(list)
+        for action in repo.list_all_action_records(tenant):
+            actions_by_invoice[action.invoice_id].append(action)
         return InvoicePage(
-            items=[_invoice_summary(repo, tenant, invoice) for invoice in invoices],
+            items=[
+                _invoice_summary(
+                    invoice,
+                    actions_by_invoice.get(invoice.id, []),
+                    settings.reminder_cooldown_hours,
+                )
+                for invoice in invoices
+            ],
             next_cursor=next_cursor,
         )
 
@@ -928,9 +940,12 @@ def create_app(
         invoice = repo.get_invoice(tenant, invoice_id)
         actions = repo.list_actions(tenant, invoice.id)
         runs, _cursor = repo.list_agent_runs(tenant, invoice.id, 1, None)
+        settings = repo.get_policy_settings(tenant)
         return InvoiceDetail(
             invoice=invoice,
-            current_state=calculate_invoice_state(invoice, actions),
+            current_state=calculate_invoice_state(
+                invoice, actions, cooldown_hours=settings.reminder_cooldown_hours
+            ),
             latest_agent_run=runs[0] if runs else None,
             latest_action=action_visible_to_role(actions[0], tenant) if actions else None,
         )
@@ -1421,6 +1436,11 @@ def create_app(
         target = runtime_settings.web_base_url.rstrip("/") + "/integrations/gmail"
         if error or not code:
             return RedirectResponse(f"{target}?status=cancelled", status_code=303)
+        # Resolve and validate the tenant before exchanging the code so a stale/mismatched
+        # OAuth state never results in a live, unrevoked Google-side grant.
+        tenant = callback_repo.require_tenant(AuthenticatedUser(oauth_state.user_id, None, None))
+        if tenant.business_id != oauth_state.business_id:
+            raise ApiError(400, "oauth_tenant_mismatch", "The Gmail connection tenant changed.")
         adapter: GmailAdapter | None = request.app.state.gmail_adapter
         cipher: TokenCipher | None = request.app.state.token_cipher
         if adapter is None or cipher is None:
@@ -1433,9 +1453,6 @@ def create_app(
         except (GmailDefiniteFailure, GmailUnavailableError):
             return RedirectResponse(f"{target}?status=failed", status_code=303)
         now = datetime.now(UTC)
-        tenant = callback_repo.require_tenant(AuthenticatedUser(oauth_state.user_id, None, None))
-        if tenant.business_id != oauth_state.business_id:
-            raise ApiError(400, "oauth_tenant_mismatch", "The Gmail connection tenant changed.")
         callback_repo.save_gmail_connection(
             tenant,
             GmailConnection(

@@ -320,7 +320,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--green); box-shad
   .auth-aside { padding: 30px 22px; min-height: 320px; }
   .auth-card-wrap { padding: 24px 14px; }
   .auth-card { padding: 28px 20px; }
-  .user-actions .data-pill { display: none; }
+  .data-pill { padding: 4px 8px; font-size: .64rem; }
   .app-header-inner { grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; }
   .app-header-inner .brand > span:last-child { display: none; }
   .user-actions { gap: 8px; }

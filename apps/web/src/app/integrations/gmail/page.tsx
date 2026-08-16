@@ -53,6 +53,9 @@ export default function GmailIntegrationPage() {
     try {
       const result = await apiFetch<GmailStatus>(user, "/api/integrations/gmail/disconnect", { method: "POST" });
       setStatus(result);
+      setError(null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Gmail could not be disconnected.");
     } finally {
       setBusy(false);
     }
@@ -65,7 +68,7 @@ export default function GmailIntegrationPage() {
         {oauthResult && <div className="alert">OAuth result: {oauthResult}</div>}
         {error && <div className="alert alert-error">{error}</div>}
         <section className="integration-card">
-          <div className="integration-status"><span className={`status-dot ${status?.connected ? "connected" : ""}`} /><div><strong>{status?.connected ? "Gmail connected" : "Gmail not connected"}</strong><p>Only the Gmail send scope is requested. CashSathi cannot read your inbox.</p></div></div>
+          <div className="integration-status"><span className={`status-dot ${status?.connected ? "connected" : ""}`} /><div><strong>{status?.connected ? "Gmail connected" : "Gmail not connected"}</strong><p>Only the Gmail send scope is requested. CashSathi cannot read your inbox.</p>{status?.connected_at && <p>Connected {new Date(status.connected_at).toLocaleString("en-IN")}</p>}{status?.last_error_code && <p className="alert alert-error">Last error: {status.last_error_code}</p>}</div></div>
           {!status?.connected ? <button className="button button-primary" disabled={busy} onClick={() => void connect()}>Connect Gmail</button> : <div className="button-row"><button className="button button-primary" disabled={busy} onClick={() => void setAutomation(!status.automation_enabled)}>{status.automation_enabled ? "Disable automatic sending" : "Enable automatic sending"}</button><button className="button button-ghost" disabled={busy} onClick={() => void disconnect()}>Disconnect</button></div>}
           <aside className="tenant-note"><strong>{status?.automation_enabled ? "Live automation enabled" : "Approval-only mode"}</strong><span>High-value, non-INR, manual-only, disputed, demo, and unclassified work remains approval-gated.</span></aside>
         </section>

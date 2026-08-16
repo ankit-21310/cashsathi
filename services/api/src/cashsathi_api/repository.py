@@ -203,6 +203,10 @@ class Repository(Protocol):
 
     def list_all_action_records(self, tenant: TenantContext | None = None) -> list[Action]: ...
 
+    def list_stale_executing_actions(
+        self, cutoff: datetime, limit: int = 200
+    ) -> list[Action]: ...
+
     def list_businesses(self) -> list[Business]: ...
 
     def list_businesses_page(
@@ -1663,6 +1667,24 @@ class FirestoreRepository:
             for snapshot in self._client.collection_group("actions").stream()
         ]
 
+    def list_stale_executing_actions(
+        self, cutoff: datetime, limit: int = 200
+    ) -> list[Action]:
+        snapshots = (
+            self._client.collection_group("actions")
+            .where("state", "==", ActionState.EXECUTING.value)
+            .where("execution_started_at", "<=", cutoff.isoformat())
+            .order_by("execution_started_at")
+            .limit(limit)
+            .stream()
+        )
+        results: list[Action] = []
+        for snapshot in snapshots:
+            data = snapshot.to_dict() or {}
+            business_id = snapshot.reference.parent.parent.id
+            results.append(Action.model_validate({**data, "business_id": business_id}))
+        return results
+
     def list_businesses(self) -> list[Business]:
         return [
             self._parse_business(snapshot.id, snapshot.to_dict() or {})
@@ -1749,12 +1771,14 @@ class FirestoreRepository:
         return entry
 
     def list_ledger_entries(self) -> list[EvidenceLedgerEntry]:
-        snapshots = (
-            self._client.collection("evidence_ledger")
-            .order_by("created_at", direction=google_firestore.Query.DESCENDING)
-            .stream()
-        )
-        return [EvidenceLedgerEntry.model_validate(snapshot.to_dict()) for snapshot in snapshots]
+        entries: list[EvidenceLedgerEntry] = []
+        cursor: str | None = None
+        while True:
+            page, cursor = self.list_ledger_entries_page(500, cursor)
+            entries.extend(page)
+            if cursor is None:
+                break
+        return entries
 
     def list_ledger_entries_page(
         self, limit: int, cursor: str | None
@@ -2917,6 +2941,27 @@ class InMemoryRepository:
             if self.invoices.get(action.invoice_id)
             and self.invoices[action.invoice_id].business_id == tenant.business_id
         ]
+
+    def list_stale_executing_actions(
+        self, cutoff: datetime, limit: int = 200
+    ) -> list[Action]:
+        results = [
+            action
+            for action in self.actions.values()
+            if action.state == ActionState.EXECUTING
+            and action.execution_started_at is not None
+            and action.execution_started_at <= cutoff
+        ]
+        results.sort(key=lambda action: action.execution_started_at or cutoff)
+        resolved: list[Action] = []
+        for action in results[:limit]:
+            business_id = action.business_id or (
+                self.invoices[action.invoice_id].business_id
+                if self.invoices.get(action.invoice_id)
+                else ""
+            )
+            resolved.append(action.model_copy(update={"business_id": business_id}))
+        return resolved
 
     def list_businesses(self) -> list[Business]:
         return list(self.businesses.values())

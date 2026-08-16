@@ -11,6 +11,7 @@ import { humanize } from "@/lib/format";
 export default function ApprovalsPage() {
   const { user } = useAuth();
   const [actions, setActions] = useState<ProposedAction[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -22,6 +23,8 @@ export default function ApprovalsPage() {
       setError(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Actions could not be loaded.");
+    } finally {
+      setLoaded(true);
     }
   }, [user]);
 
@@ -71,7 +74,7 @@ export default function ApprovalsPage() {
             </div>
           </article>
         ))}</div>
-        {!actions.length && <div className="empty-panel standalone"><strong>No active actions</strong><p>Approval-gated and failed reminders will appear here.</p></div>}
+        {!loaded ? <div className="empty-panel standalone"><strong>Loading action queue…</strong></div> : !actions.length && <div className="empty-panel standalone"><strong>No active actions</strong><p>Approval-gated and failed reminders will appear here.</p></div>}
       </main>
     </AuthenticatedShell>
   );
