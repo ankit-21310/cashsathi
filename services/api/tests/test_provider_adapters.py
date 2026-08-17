@@ -22,7 +22,11 @@ from cashsathi_api.gmail import (
     GoogleGmailAdapter,
     GoogleKmsTokenCipher,
 )
-from cashsathi_api.invoice_processing import GeminiInvoiceExtractor, ValidatedPdf
+from cashsathi_api.invoice_processing import (
+    GeminiInvoiceExtractor,
+    ValidatedPdf,
+    gemini_extraction_schema,
+)
 from cashsathi_api.scheduler_auth import GoogleSchedulerVerifier, VercelCronVerifier
 
 
@@ -70,7 +74,19 @@ def test_gemini_extraction_adapter_accepts_only_the_structured_contract() -> Non
     assert len(models.calls) == 1
     config = models.calls[0]["config"]
     assert config.response_mime_type == "application/json"
-    assert config.response_schema is ExtractedInvoiceDraft
+    assert config.response_schema == gemini_extraction_schema()
+    confidence_schema = config.response_schema["properties"]["confidence"]
+    assert "additionalProperties" not in confidence_schema
+    assert set(confidence_schema["properties"]) == {
+        "invoice_number",
+        "customer_name",
+        "customer_email",
+        "amount_decimal",
+        "currency",
+        "issue_date",
+        "due_date",
+        "payment_terms",
+    }
     assert config.temperature == 0
 
 

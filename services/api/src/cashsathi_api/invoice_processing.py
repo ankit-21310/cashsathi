@@ -4,7 +4,7 @@ import time
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import PurePath
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 import structlog
 from google import genai
@@ -47,6 +47,41 @@ class InvoiceExtractor(Protocol):
 
 class ExtractionUnavailableError(Exception):
     pass
+
+
+_CONFIDENCE_FIELDS = (
+    "invoice_number",
+    "customer_name",
+    "customer_email",
+    "amount_decimal",
+    "currency",
+    "issue_date",
+    "due_date",
+    "payment_terms",
+)
+
+
+def gemini_extraction_schema() -> dict[str, Any]:
+    """Return a Gemini Developer API compatible structured-output schema.
+
+    Pydantic represents ``dict[str, Confidence]`` with ``additionalProperties``,
+    which the Developer API rejects before sending the request. Confidence keys
+    are intentionally constrained to the invoice fields the product displays.
+    """
+
+    schema = ExtractedInvoiceDraft.model_json_schema()
+    schema["properties"]["confidence"] = {
+        "type": "object",
+        "title": "Confidence",
+        "properties": {
+            field_name: {
+                "type": "string",
+                "enum": [confidence.value for confidence in Confidence],
+            }
+            for field_name in _CONFIDENCE_FIELDS
+        },
+    }
+    return schema
 
 
 def validate_pdf(
@@ -175,7 +210,7 @@ class GeminiInvoiceExtractor:
                     ],
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
-                        response_schema=ExtractedInvoiceDraft,
+                        response_schema=gemini_extraction_schema(),
                         temperature=0,
                     ),
                 )
