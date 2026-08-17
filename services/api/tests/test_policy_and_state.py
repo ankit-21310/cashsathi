@@ -76,6 +76,26 @@ def test_state_precedence_is_deterministic() -> None:
     assert calculate_invoice_state(invoice(), now=NOW) == InvoiceState.OVERDUE
 
 
+def test_waiting_for_reply_respects_the_configured_cooldown() -> None:
+    delivered = Action(
+        id="act_1",
+        invoice_id="inv_1",
+        agent_run_id="run_1",
+        state=ActionState.SUCCEEDED,
+        created_at=NOW - timedelta(hours=100),
+        execution_completed_at=NOW - timedelta(hours=100),
+    )
+    # 100 hours since delivery: past the default 72h cooldown, but still inside a
+    # business-configured 168h (weekly) cooldown, so the two must disagree.
+    assert (
+        calculate_invoice_state(invoice(), [delivered], now=NOW) == InvoiceState.OVERDUE
+    )
+    assert (
+        calculate_invoice_state(invoice(), [delivered], now=NOW, cooldown_hours=168)
+        == InvoiceState.WAITING_FOR_REPLY
+    )
+
+
 def test_paid_disputed_and_legal_risks_are_hard_stops() -> None:
     assert (
         policy(invoice(verified_paid_minor=100_000), InvoiceState.PAID, proposal()).final_decision

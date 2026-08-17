@@ -29,6 +29,7 @@ test.describe("production judge smoke", () => {
     await expect(page.getByText("Conservative attribution", { exact: true })).toBeVisible();
     await expect(page.getByText("AI decisions", { exact: true })).toBeVisible();
 
+    await page.getByRole("button", { name: "More" }).click();
     await page.getByRole("link", { name: "Privacy", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Privacy and plan" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Download my data" })).toBeVisible();

@@ -54,6 +54,7 @@ export default function OnboardingPage() {
           <div className="eyebrow">Create your isolated workspace</div>
           <h1>What should we call your business?</h1>
           <p>This name identifies your tenant. Customer and invoice setup begins in the next product phase.</p>
+          {user?.email && <p className="aside-note">Signed in as <strong>{user.email}</strong></p>}
           {error && <div className="alert alert-error">{error}</div>}
           {checking ? <div className="centered-state compact">Checking existing membership…</div> : (
             <form onSubmit={submit}>

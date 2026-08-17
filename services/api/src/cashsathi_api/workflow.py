@@ -79,8 +79,10 @@ class CollectionWorkflow:
     async def evaluate(self, tenant: TenantContext, invoice_id: str) -> EvaluationResult:
         invoice = self._repo.get_invoice(tenant, invoice_id)
         actions = self._repo.list_actions(tenant, invoice.id)
-        state = calculate_invoice_state(invoice, actions)
         policy_settings = self._repo.get_policy_settings(tenant)
+        state = calculate_invoice_state(
+            invoice, actions, cooldown_hours=policy_settings.reminder_cooldown_hours
+        )
         run_id = f"run_{uuid4().hex}"
         created_at = datetime.now(UTC)
         try:
@@ -265,6 +267,7 @@ class CollectionWorkflow:
             Action(
                 id=f"act_{action_key[:28]}",
                 invoice_id=invoice.id,
+                business_id=tenant.business_id,
                 agent_run_id=run_id,
                 state=ActionState.PROPOSED if automatic else ActionState.AWAITING_APPROVAL,
                 created_at=created_at,
@@ -428,7 +431,10 @@ class CollectionWorkflow:
                 409, "action_not_awaiting_approval", "The action is not awaiting approval."
             )
         invoice = self._repo.get_invoice(tenant, action.invoice_id)
-        state = calculate_invoice_state(invoice, self._repo.list_actions(tenant, invoice.id))
+        cooldown = self._repo.get_policy_settings(tenant).reminder_cooldown_hours
+        state = calculate_invoice_state(
+            invoice, self._repo.list_actions(tenant, invoice.id), cooldown_hours=cooldown
+        )
         if state in {InvoiceState.PAID, InvoiceState.DISPUTED, InvoiceState.HUMAN_REVIEW}:
             raise ApiError(409, "action_policy_changed", "The invoice can no longer be reminded.")
         now = datetime.now(UTC)
@@ -439,7 +445,6 @@ class CollectionWorkflow:
         ]
         if deliveries:
             latest = max(item.execution_completed_at or item.created_at for item in deliveries)
-            cooldown = self._repo.get_policy_settings(tenant).reminder_cooldown_hours
             if latest + timedelta(hours=cooldown) > now:
                 raise ApiError(409, "reminder_cooldown", "A recent reminder is still cooling down.")
         approved = action.model_copy(
@@ -553,17 +558,13 @@ class CollectionWorkflow:
         current = now or datetime.now(UTC)
         cutoff = current - timedelta(minutes=self._settings.action_execution_timeout_minutes)
         changed = 0
-        for action in self._repo.list_all_action_records():
-            if (
-                action.state != ActionState.EXECUTING
-                or action.execution_started_at is None
-                or action.execution_started_at > cutoff
-            ):
+        for action in self._repo.list_stale_executing_actions(cutoff):
+            if not action.business_id:
                 continue
-            invoice = next(
-                item for item in self._repo.list_all_invoices() if item.id == action.invoice_id
+            tenant = TenantContext(
+                "cloud-scheduler", action.business_id, MembershipRole.OWNER
             )
-            tenant = TenantContext("cloud-scheduler", invoice.business_id, MembershipRole.OWNER)
+            invoice = self._repo.get_invoice(tenant, action.invoice_id)
             unknown = action.model_copy(
                 update={
                     "state": ActionState.UNKNOWN,

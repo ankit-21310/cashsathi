@@ -31,6 +31,7 @@ def calculate_metrics(repo: Repository, tenant: TenantContext | None = None) -> 
     invoices = repo.list_all_invoices(tenant)
     runs = repo.list_all_agent_runs(tenant)
     actions = repo.list_all_action_records(tenant)
+    cooldown_by_business: dict[str, int] = {}
     payments = repo.list_payments(tenant) if tenant else []
     if tenant is None:
         payments = []
@@ -41,6 +42,13 @@ def calculate_metrics(repo: Repository, tenant: TenantContext | None = None) -> 
                 role=MembershipRole.OWNER,
             )
             payments.extend(repo.list_payments(system_tenant))
+            cooldown_by_business[business.id] = repo.get_policy_settings(
+                system_tenant
+            ).reminder_cooldown_hours
+    else:
+        cooldown_by_business[tenant.business_id] = repo.get_policy_settings(
+            tenant
+        ).reminder_cooldown_hours
 
     actions_by_invoice: dict[str, list[Action]] = defaultdict(list)
     for action in actions:
@@ -69,7 +77,12 @@ def calculate_metrics(repo: Repository, tenant: TenantContext | None = None) -> 
         amount["monitored_minor"] += invoice.amount_minor
         amount["outstanding_minor"] += balance
         amount["verified_paid_minor"] += invoice.verified_paid_minor
-        state = calculate_invoice_state(invoice, actions_by_invoice[invoice.id], now)
+        state = calculate_invoice_state(
+            invoice,
+            actions_by_invoice[invoice.id],
+            now,
+            cooldown_hours=cooldown_by_business.get(invoice.business_id, 72),
+        )
         if state.value == "OVERDUE":
             overdue_count += 1
             amount["overdue_minor"] += balance

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from urllib.parse import parse_qs, urlparse
 
 from fastapi.testclient import TestClient
 from pypdf import PdfWriter
 
-from cashsathi_api.domain import AuthenticatedUser, GmailConnection
+from cashsathi_api.domain import Action, ActionState, AuthenticatedUser, GmailConnection
 from cashsathi_api.repository import InMemoryRepository
 
 
@@ -214,3 +214,30 @@ def test_scheduler_is_oidc_gated_and_repeated_runs_do_not_duplicate_actions(
     assert second.status_code == 200
     assert second.json()["claimed"] == 0
     assert len(repository.actions) == 1
+
+
+def test_stale_executing_actions_are_reconciled_via_bounded_query(
+    client: TestClient, repository: InMemoryRepository
+) -> None:
+    invoice = setup_invoice(client, "-stale")
+    stale_started = datetime.now(UTC) - timedelta(hours=2)
+    repository.actions["act_stale"] = Action(
+        id="act_stale",
+        invoice_id=invoice["id"],
+        business_id=invoice["business_id"],
+        agent_run_id="run_stale",
+        state=ActionState.EXECUTING,
+        created_at=stale_started,
+        execution_started_at=stale_started,
+    )
+
+    stale = repository.list_stale_executing_actions(datetime.now(UTC))
+    assert [action.id for action in stale] == ["act_stale"]
+    assert stale[0].business_id == invoice["business_id"]
+
+    response = client.post("/api/jobs/recheck", headers={"Authorization": "Bearer scheduler-token"})
+    assert response.status_code == 200
+
+    reconciled = repository.actions["act_stale"]
+    assert reconciled.state == ActionState.UNKNOWN
+    assert reconciled.failure_code == "stale_execution"

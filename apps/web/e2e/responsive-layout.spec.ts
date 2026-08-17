@@ -74,6 +74,7 @@ test("authenticated routes remain reachable without horizontal overflow", async 
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/dashboard");
+  await expect(page.locator(".data-pill")).toBeVisible();
   const menuButton = page.getByRole("button", { name: "Menu" });
   await expect(menuButton).toBeVisible();
   await menuButton.click();
