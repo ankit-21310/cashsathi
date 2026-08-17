@@ -10,7 +10,7 @@ This runbook covers the Phase 6–8 repository release. Cloud deployment, genuin
 4. Run `infra/gcp/configure-observability.ps1` **before** smoke events. User-defined log metrics do not backfill.
 5. Deploy with strict readiness enabled and exact HTTPS web/API/OAuth origins, Gmail/KMS secrets, scheduler identity/audience, and at least one administrator UID.
 6. Provision the judge account with a password supplied only through the operator environment. Run the clean-browser production smoke script.
-7. Run `infra/gcp/emit-alert-test-events.ps1 -ProjectId <id> -ConfirmNotifications` and confirm four notifications. Verify the two-hour heartbeat-absence policy in a separately scheduled window. Synthetic events contain no customer payloads.
+7. Run `infra/gcp/emit-alert-test-events.ps1 -ProjectId <id> -ConfirmNotifications` and confirm five notifications, including the billing-verification alert. Verify the two-hour heartbeat-absence policy in a separately scheduled window. Synthetic events contain no customer payloads.
 8. Generate a fresh admin evidence ZIP, replace every Phase 8 package placeholder, commit the intended release, and run `npm run verify:phase8 -- --evidence-zip <path>`. Preserve the untracked checksum manifest with the controlled release evidence.
 
 ## Alert response

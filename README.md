@@ -76,6 +76,10 @@ API, and a revoked member immediately loses tenant access.
   history, forecast data, methodology, and a manifest.
 - Admin validation records, a Founder Recovery Plan ledger, and sanitized schema-v2 evidence
   exports for controlled evaluation.
+- Razorpay Standard Checkout for the ₹299 Founder Recovery Plan, captured-payment fulfilment,
+  refund-aware entitlements, and an owner-visible billing history.
+- A separate platform-admin Revenue Command Center with customer/payment search, revenue and
+  refund metrics, provider-reported fees, sanitized payment detail, and filtered CSV export.
 - Firebase email/password authentication with account creation, sign-in, and password reset.
 - Versioned product and optional evidence consent, account export and deletion, tenant
   isolation, rate limits, request deadlines, production readiness checks, and alerts.
@@ -110,6 +114,8 @@ flowchart LR
     A --> G[Gemini API]
     A --> K[Cloud KMS]
     A --> M[Gmail API]
+    A --> R[Razorpay Orders / Payments]
+    R -->|signed webhooks| A
     S[Cloud Scheduler] -->|Google OIDC| A
     A --> L[Cloud Logging]
 ```

@@ -125,6 +125,7 @@ def build_account_export(
         actions=repo.list_all_action_records(tenant),
         payments=repo.list_payments(tenant),
         founder_plan=repo.get_founder_plan(tenant.business_id),
+        billing_transactions=repo.list_billing_transactions(tenant.business_id),
         gmail_connected=bool(
             connection and connection.disconnected_at is None and connection.encrypted_refresh_token
         ),

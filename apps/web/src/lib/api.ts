@@ -10,6 +10,7 @@ export interface Business {
   data_classification: "UNCLASSIFIED" | "DEMO" | "REAL";
   relationship: "UNCLASSIFIED" | "ARMS_LENGTH" | "RELATED" | "PREEXISTING";
   evidence_pseudonym: string;
+  billing_access_mode: "LEGACY" | "REQUIRED";
 }
 
 export interface Membership {
@@ -383,7 +384,7 @@ export interface FounderPlan {
   id: string;
   business_id: string;
   plan_version: "FOUNDER_RECOVERY_2026_V1";
-  status: "ACTIVE" | "EXHAUSTED";
+  status: "ACTIVE" | "EXHAUSTED" | "REFUNDED";
   price_minor: 29900;
   currency: "INR";
   invoice_limit: 10;
@@ -391,6 +392,113 @@ export interface FounderPlan {
   ledger_entry_id: string;
   receipt_reference: string;
   activated_at: string;
+  source: "MANUAL" | "RAZORPAY";
+  provider_order_id: string | null;
+  provider_payment_id: string | null;
+  refunded_at: string | null;
+}
+
+export type BillingOrderStatus = "CREATED" | "ATTEMPTED" | "PAID";
+export type BillingTransactionStatus =
+  | "AUTHORIZED"
+  | "CAPTURED"
+  | "FAILED"
+  | "PARTIALLY_REFUNDED"
+  | "REFUNDED";
+
+export interface BillingOrder {
+  id: string;
+  business_id: string;
+  provider: "MANUAL" | "RAZORPAY";
+  provider_order_id: string | null;
+  receipt: string;
+  idempotency_key: string;
+  amount_minor: 29900;
+  currency: "INR";
+  status: BillingOrderStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BillingTransaction {
+  id: string;
+  business_id: string | null;
+  billing_order_id: string;
+  provider: "MANUAL" | "RAZORPAY";
+  provider_payment_id: string;
+  provider_order_id: string | null;
+  amount_minor: number;
+  currency: string;
+  amount_refunded_minor: number;
+  provider_fee_minor: number;
+  provider_tax_minor: number;
+  payment_method: string | null;
+  payer_email: string | null;
+  status: BillingTransactionStatus;
+  failure_code: string | null;
+  failure_description: string | null;
+  captured_at: string | null;
+  refunded_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BillingCheckoutOrder {
+  order: BillingOrder;
+  public_key_id: string;
+  business_name: string;
+  customer_email: string | null;
+}
+
+export interface BillingConfirmation {
+  status: "CAPTURED" | "PROCESSING";
+  transaction: BillingTransaction;
+  plan: FounderPlan | null;
+}
+
+export interface BillingCurrent {
+  billing_access_mode: "LEGACY" | "REQUIRED";
+  payment_required: boolean;
+  plan: FounderPlan | null;
+  latest_order: BillingOrder | null;
+  transactions: BillingTransaction[];
+}
+
+export interface RevenueSummary {
+  gross_captured_minor: number;
+  refunded_minor: number;
+  net_captured_minor: number;
+  provider_fees_minor: number;
+  provider_tax_minor: number;
+  paying_businesses: number;
+  capture_rate: number;
+  active_plans: number;
+  exhausted_plans: number;
+  refunded_plans: number;
+  currency: "INR";
+}
+
+export interface RevenueCustomer {
+  business_id: string;
+  business_name: string;
+  payer_email: string | null;
+  data_classification: Business["data_classification"];
+  relationship: Business["relationship"];
+  payment_status: BillingTransactionStatus | null;
+  payment_method: string | null;
+  captured_at: string | null;
+  gross_captured_minor: number;
+  refunded_minor: number;
+  plan_status: FounderPlan["status"] | null;
+  invoices_used: number;
+  invoice_limit: number;
+}
+
+export interface RevenuePaymentDetail {
+  payment: BillingTransaction;
+  order: BillingOrder | null;
+  business: Business | null;
+  plan: FounderPlan | null;
 }
 
 export type ProspectStatus =

@@ -52,6 +52,13 @@ class Settings(BaseSettings):
     scheduler_concurrency: int = Field(default=3, ge=1, le=10)
     action_execution_timeout_minutes: int = Field(default=10, ge=1, le=60)
     platform_admin_uids: str = ""
+    billing_enforcement_enabled: bool = False
+    razorpay_mode: Literal["test", "live"] = "test"
+    razorpay_key_id: str | None = None
+    razorpay_key_secret: SecretStr | None = None
+    razorpay_webhook_secret: SecretStr | None = None
+    razorpay_previous_webhook_secret: SecretStr | None = None
+    razorpay_timeout_seconds: int = Field(default=15, ge=3, le=30)
     strict_production_readiness: bool = False
     max_json_bytes: int = Field(default=256 * 1024, ge=1024, le=2 * 1024 * 1024)
     default_request_timeout_seconds: int = Field(default=30, ge=1, le=120)
@@ -152,6 +159,18 @@ class Settings(BaseSettings):
                 "https://"
             ):
                 raise ValueError("Strict production scheduler audience must use HTTPS")
+        if self.billing_enforcement_enabled:
+            billing_required = {
+                "Razorpay key ID": self.razorpay_key_id,
+                "Razorpay key secret": self.razorpay_key_secret,
+                "Razorpay webhook secret": self.razorpay_webhook_secret,
+            }
+            missing_billing = [name for name, value in billing_required.items() if not value]
+            if missing_billing:
+                raise ValueError("Billing enforcement requires: " + ", ".join(missing_billing))
+            expected_prefix = "rzp_live_" if self.razorpay_mode == "live" else "rzp_test_"
+            if not str(self.razorpay_key_id).startswith(expected_prefix):
+                raise ValueError(f"Razorpay {self.razorpay_mode} mode requires a matching key ID")
         return self
 
 

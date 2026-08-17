@@ -241,7 +241,7 @@ def admin_impact(repo: Repository) -> AdminImpactResponse:
     entries = repo.list_ledger_entries()
     by_id = {entry.id: entry for entry in entries}
     for entry in entries:
-        sign = -1 if entry.reversal_of else 1
+        sign = -1 if entry.reversal_of or entry.kind == LedgerKind.PRODUCT_REFUND else 1
         if entry.reversal_of and entry.reversal_of not in by_id:
             continue
         amount = entry.amount_minor * sign

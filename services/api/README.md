@@ -10,6 +10,7 @@ Operator utilities default to dry-run:
 uv run python scripts/backfill_phase_6_7.py --project <id>
 uv run python scripts/backfill_phase_9.py --project <id>
 uv run python scripts/import_validation_prospects.py --project <id> --admin-uid <uid>
+uv run python scripts/backfill_billing.py
 ```
 
 Add `--apply` only after reviewing counts. Neither utility sends messages or changes invoice outcomes.
@@ -40,6 +41,9 @@ FastAPI service for Firebase authentication, tenant-derived authorization, trans
 - `GET /api/metrics`
 - `GET|POST /api/jobs/recheck` (Vercel cron secret or Google OIDC, by runtime platform)
 - `GET|POST /api/admin/*` (configured Firebase administrators only)
+- `POST /api/billing/orders`, `POST /api/billing/confirm`, and `GET /api/billing/current`
+- `POST /api/webhooks/razorpay` (raw-body HMAC signature, no Firebase token)
+- `GET /api/admin/revenue/*` (platform administrators only)
 
 The PDF exists only for the extraction request. OAuth refresh tokens use Google KMS on GCP and
 versioned AES-256-GCM on Vercel. Evidence events and logs never contain PDF bytes, tokens, raw

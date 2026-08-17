@@ -46,6 +46,10 @@ class EvidenceEventType(StrEnum):
     OPTIONAL_CONSENT_GRANTED = "privacy.optional_consent_granted"
     OPTIONAL_CONSENT_WITHDRAWN = "privacy.optional_consent_withdrawn"
     PLAN_ACTIVATED = "plan.activated"
+    BILLING_ORDER_CREATED = "billing.order_created"
+    BILLING_PAYMENT_CAPTURED = "billing.payment_captured"
+    BILLING_PAYMENT_FAILED = "billing.payment_failed"
+    BILLING_REFUND_PROCESSED = "billing.refund_processed"
     PROSPECT_UPDATED = "validation.prospect_updated"
     INTERVIEW_RECORDED = "validation.interview_recorded"
     ACCOUNT_DELETED = "privacy.account_deleted"
@@ -113,6 +117,30 @@ class BusinessRelationship(StrEnum):
     PREEXISTING = "PREEXISTING"
 
 
+class BillingAccessMode(StrEnum):
+    LEGACY = "LEGACY"
+    REQUIRED = "REQUIRED"
+
+
+class BillingProvider(StrEnum):
+    MANUAL = "MANUAL"
+    RAZORPAY = "RAZORPAY"
+
+
+class BillingOrderStatus(StrEnum):
+    CREATED = "CREATED"
+    ATTEMPTED = "ATTEMPTED"
+    PAID = "PAID"
+
+
+class BillingTransactionStatus(StrEnum):
+    AUTHORIZED = "AUTHORIZED"
+    CAPTURED = "CAPTURED"
+    FAILED = "FAILED"
+    PARTIALLY_REFUNDED = "PARTIALLY_REFUNDED"
+    REFUNDED = "REFUNDED"
+
+
 class InvoiceWorkflowStatus(StrEnum):
     OPEN = "OPEN"
     PAUSED = "PAUSED"
@@ -151,6 +179,7 @@ class ActionResolution(StrEnum):
 
 class LedgerKind(StrEnum):
     PRODUCT_REVENUE = "PRODUCT_REVENUE"
+    PRODUCT_REFUND = "PRODUCT_REFUND"
     EXPENSE = "EXPENSE"
 
 
@@ -185,6 +214,7 @@ class WillingnessToPay(StrEnum):
 class FounderPlanStatus(StrEnum):
     ACTIVE = "ACTIVE"
     EXHAUSTED = "EXHAUSTED"
+    REFUNDED = "REFUNDED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,6 +291,7 @@ class Business(BaseModel):
     data_classification: DataClassification = DataClassification.UNCLASSIFIED
     relationship: BusinessRelationship = BusinessRelationship.UNCLASSIFIED
     evidence_pseudonym: str = ""
+    billing_access_mode: BillingAccessMode = BillingAccessMode.LEGACY
 
 
 class Membership(BaseModel):
@@ -989,11 +1020,136 @@ class FounderPlanEnrollment(BaseModel):
     idempotency_key: str
     activated_by: str
     activated_at: datetime
+    source: BillingProvider = BillingProvider.MANUAL
+    provider_order_id: str | None = None
+    provider_payment_id: str | None = None
+    refunded_at: datetime | None = None
 
 
 class FounderPlanPage(BaseModel):
     items: list[FounderPlanEnrollment]
     next_cursor: str | None
+
+
+class BillingOrderCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str = Field(min_length=8, max_length=100)
+
+
+class BillingOrder(BaseModel):
+    id: str
+    business_id: str
+    provider: BillingProvider = BillingProvider.RAZORPAY
+    provider_order_id: str | None
+    receipt: str = Field(max_length=40)
+    idempotency_key: str
+    plan_version: Literal["FOUNDER_RECOVERY_2026_V1"] = "FOUNDER_RECOVERY_2026_V1"
+    amount_minor: Literal[29900] = 29900
+    currency: Literal["INR"] = "INR"
+    status: BillingOrderStatus
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class BillingCheckoutOrder(BaseModel):
+    order: BillingOrder
+    public_key_id: str
+    business_name: str
+    customer_email: str | None
+
+
+class BillingConfirm(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider_order_id: str = Field(min_length=5, max_length=100)
+    provider_payment_id: str = Field(min_length=5, max_length=100)
+    signature: str = Field(min_length=16, max_length=256)
+
+
+class BillingTransaction(BaseModel):
+    id: str
+    business_id: str | None
+    billing_order_id: str
+    provider: BillingProvider
+    provider_payment_id: str
+    provider_order_id: str | None
+    amount_minor: int = Field(ge=0)
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    amount_refunded_minor: int = Field(default=0, ge=0)
+    provider_fee_minor: int = Field(default=0, ge=0)
+    provider_tax_minor: int = Field(default=0, ge=0)
+    payment_method: str | None = Field(default=None, max_length=50)
+    payer_email: EmailStr | None = None
+    status: BillingTransactionStatus
+    failure_code: str | None = Field(default=None, max_length=100)
+    failure_description: str | None = Field(default=None, max_length=300)
+    captured_at: datetime | None = None
+    refunded_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class BillingConfirmation(BaseModel):
+    status: Literal["CAPTURED", "PROCESSING"]
+    transaction: BillingTransaction
+    plan: FounderPlanEnrollment | None
+
+
+class BillingCurrent(BaseModel):
+    billing_access_mode: BillingAccessMode
+    payment_required: bool
+    plan: FounderPlanEnrollment | None
+    latest_order: BillingOrder | None
+    transactions: list[BillingTransaction]
+
+
+class RevenueSummary(BaseModel):
+    gross_captured_minor: int
+    refunded_minor: int
+    net_captured_minor: int
+    provider_fees_minor: int
+    provider_tax_minor: int
+    paying_businesses: int
+    capture_rate: float
+    active_plans: int
+    exhausted_plans: int
+    refunded_plans: int
+    currency: Literal["INR"] = "INR"
+
+
+class RevenueCustomer(BaseModel):
+    business_id: str
+    business_name: str
+    payer_email: EmailStr | None
+    data_classification: DataClassification
+    relationship: BusinessRelationship
+    payment_status: BillingTransactionStatus | None
+    payment_method: str | None
+    captured_at: datetime | None
+    gross_captured_minor: int
+    refunded_minor: int
+    plan_status: FounderPlanStatus | None
+    invoices_used: int
+    invoice_limit: int
+
+
+class RevenueCustomerPage(BaseModel):
+    items: list[RevenueCustomer]
+    next_cursor: str | None
+
+
+class RevenuePaymentPage(BaseModel):
+    items: list[BillingTransaction]
+    next_cursor: str | None
+
+
+class RevenuePaymentDetail(BaseModel):
+    payment: BillingTransaction
+    order: BillingOrder | None
+    business: Business | None
+    plan: FounderPlanEnrollment | None
 
 
 class AccountExport(BaseModel):
@@ -1008,6 +1164,7 @@ class AccountExport(BaseModel):
     actions: list[Action]
     payments: list[Payment]
     founder_plan: FounderPlanEnrollment | None
+    billing_transactions: list[BillingTransaction] = Field(default_factory=list)
     gmail_connected: bool
 
 

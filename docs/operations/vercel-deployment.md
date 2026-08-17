@@ -25,6 +25,8 @@ WEB_BASE_URL=https://cashsathi-web.vercel.app
 GEMINI_MODEL=gemini-3.6-flash
 GMAIL_OAUTH_REDIRECT_URI=https://cashsathi-api.vercel.app/api/integrations/gmail/callback
 PLATFORM_ADMIN_UIDS=<demo-admin-firebase-uid>
+BILLING_ENFORCEMENT_ENABLED=false
+RAZORPAY_MODE=test
 ```
 
 Retain the timeout, request-size, scheduler batch, scheduler concurrency, and export limit
@@ -39,6 +41,10 @@ GMAIL_OAUTH_CLIENT_SECRET=<dedicated demo client secret>
 GMAIL_TOKEN_ENCRYPTION_KEY_B64=<base64 of exactly 32 random bytes>
 CRON_SECRET=<random bearer secret>
 GMAIL_RECIPIENT_ALLOWLIST=<comma-separated dedicated test mailboxes>
+RAZORPAY_KEY_ID=<test or live public key id>
+RAZORPAY_KEY_SECRET=<matching write-only key secret>
+RAZORPAY_WEBHOOK_SECRET=<at least 32 random characters>
+RAZORPAY_PREVIOUS_WEBHOOK_SECRET=<optional rotation fallback>
 ```
 
 Do not configure emulator variables, `GMAIL_KMS_KEY_NAME`, Scheduler identity, or Scheduler
@@ -74,5 +80,11 @@ credentials to Preview. Keep Vercel Authentication enabled for previews only.
 3. Set the final API URL as the Gmail OAuth callback.
 4. Deploy the web project, then set the web URL in API CORS and `WEB_BASE_URL`.
 5. Add the final web hostname to Firebase Authentication's authorized domains.
-6. Redeploy both projects and perform the production smoke test with synthetic data and one
-   allowlisted mailbox.
+6. Configure the Razorpay webhook URL as
+   `https://cashsathi-api.vercel.app/api/webhooks/razorpay` for `payment.captured`,
+   `payment.failed`, and `refund.processed`; enable automatic capture in the Razorpay dashboard.
+7. Deploy with Razorpay Test Mode and `BILLING_ENFORCEMENT_ENABLED=false`, run
+   `uv run python scripts/backfill_billing.py`, review the count, then repeat with `--apply`.
+8. Verify one test capture and refund, switch to matching live credentials, enable billing
+   enforcement, and redeploy both projects.
+9. Perform the production smoke test with synthetic invoice data and one allowlisted mailbox.

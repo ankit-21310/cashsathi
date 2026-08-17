@@ -207,6 +207,9 @@ def test_founder_plan_activation_is_exact_and_idempotent(
     assert len(entries) == 1
     assert entries[0].amount_minor == 29_900
     assert entries[0].kind.value == "PRODUCT_REVENUE"
+    billing_transactions = repository.list_billing_transactions(str(business["id"]))
+    assert len(billing_transactions) == 1
+    assert billing_transactions[0].provider.value == "MANUAL"
 
     for index in range(1, 10):
         extraction_id = repository.record_extraction(tenant, {"test": True})

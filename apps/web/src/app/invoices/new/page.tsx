@@ -5,7 +5,8 @@ import { useRouter } from "next/navigation";
 
 import { AuthenticatedShell } from "@/components/authenticated-shell";
 import { useAuth } from "@/components/auth-provider";
-import { apiFetch, ConsentStatus, ExtractionResult, Invoice } from "@/lib/api";
+import { RazorpayCheckout } from "@/components/razorpay-checkout";
+import { ApiClientError, apiFetch, ConsentStatus, ExtractionResult, Invoice } from "@/lib/api";
 
 const MAX_PDF_BYTES = 10 * 1024 * 1024;
 
@@ -44,6 +45,7 @@ export default function NewInvoicePage() {
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [paymentRequired, setPaymentRequired] = useState(false);
 
   useEffect(() => {
     if (loading || !user) return;
@@ -134,6 +136,9 @@ export default function NewInvoicePage() {
       });
       router.push(`/invoices/${invoice.id}`);
     } catch (reason) {
+      if (reason instanceof ApiClientError && reason.code === "payment_required") {
+        setPaymentRequired(true);
+      }
       setError(reason instanceof Error ? reason.message : "The invoice could not be confirmed.");
     } finally {
       setBusy(false);
@@ -181,6 +186,7 @@ export default function NewInvoicePage() {
                 </div>
                 <label className="checkbox-label"><input type="checkbox" checked={review.customer_manual_only} onChange={(e) => setField("customer_manual_only", e.target.checked)} /><span>Always require approval for this customer</span></label>
                 <label className="checkbox-label confirmation"><input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} /><span>I checked these fields against the invoice and confirm they are accurate.</span></label>
+                {paymentRequired && <div className="invoice-paywall"><div><div className="eyebrow">Payment required</div><strong>Activate the ₹299 Founder Recovery Plan</strong><p>Your reviewed fields stay here. Complete checkout, then confirm this invoice again.</p></div><RazorpayCheckout label="Activate plan · ₹299" onConfirmed={(result) => { if (result.status === "CAPTURED") { setPaymentRequired(false); setError(null); } }} /></div>}
                 <button className="button button-primary" disabled={!confirmed || busy}>{busy ? "Saving confirmed invoice…" : "Confirm invoice"}</button>
               </form>
             </div>

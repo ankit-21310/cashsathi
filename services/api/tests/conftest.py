@@ -3,6 +3,7 @@ from collections.abc import Iterator
 import pytest
 from fastapi.testclient import TestClient
 
+from cashsathi_api.billing import ProviderOrder, ProviderPayment
 from cashsathi_api.config import Settings
 from cashsathi_api.decisioning import DecisionOutput
 from cashsathi_api.domain import (
@@ -137,13 +138,62 @@ class TestSchedulerVerifier:
         return "scheduler@example.test"
 
 
+class TestPaymentGateway:
+    __test__ = False
+    public_key_id = "rzp_test_public"
+
+    def __init__(self) -> None:
+        self.payments: dict[str, ProviderPayment] = {}
+
+    def create_or_find_order(
+        self, *, amount_minor: int, currency: str, receipt: str, billing_order_id: str
+    ) -> ProviderOrder:
+        assert amount_minor == 29_900
+        assert currency == "INR"
+        assert billing_order_id == receipt
+        return ProviderOrder(id=f"order_{receipt}", status="created")
+
+    def fetch_payment(self, payment_id: str) -> ProviderPayment:
+        return self.payments.get(
+            payment_id,
+            ProviderPayment(
+                id=payment_id,
+                order_id="",
+                amount=29_900,
+                currency="INR",
+                status="captured",
+                amount_refunded=0,
+                fee=600,
+                tax=108,
+                method="upi",
+                email="alice@example.com",
+                error_code=None,
+                error_description=None,
+                created_at=1_787_000_000,
+            ),
+        )
+
+    def verify_checkout_signature(self, *, order_id: str, payment_id: str, signature: str) -> bool:
+        return bool(order_id and payment_id and signature == "valid-signature-test")
+
+    def verify_webhook_signature(self, body: bytes, signature: str) -> bool:
+        return bool(body and signature == "valid-webhook")
+
+
 @pytest.fixture
 def repository() -> InMemoryRepository:
     return InMemoryRepository()
 
 
 @pytest.fixture
-def client(repository: InMemoryRepository) -> Iterator[TestClient]:
+def payment_gateway() -> TestPaymentGateway:
+    return TestPaymentGateway()
+
+
+@pytest.fixture
+def client(
+    repository: InMemoryRepository, payment_gateway: TestPaymentGateway
+) -> Iterator[TestClient]:
     settings = Settings(
         app_env="test",
         gcp_project_id="cashsathi-test",
@@ -160,6 +210,7 @@ def client(repository: InMemoryRepository) -> Iterator[TestClient]:
         token_cipher=TestTokenCipher(),
         scheduler_verifier=TestSchedulerVerifier(),
         account_auth_manager=TestAccountAuthManager(),
+        payment_gateway=payment_gateway,
     )
     with TestClient(app, raise_server_exceptions=False) as test_client:
         yield test_client

@@ -43,7 +43,7 @@ export default function Home() {
       </section>
       <section className="pricing-panel" aria-label="Founder Recovery Plan">
         <div><div className="eyebrow">Founder pricing hypothesis</div><h2>₹299 one-time</h2><p>Up to 10 confirmed invoices, AI tracking, controlled Gmail reminders, dashboard, and action history.</p></div>
-        <div><strong>Manual payment verification</strong><p>No subscription and no automatic billing. Limited preview availability.</p><Link className="button button-primary" href="/login">Start the Founder Plan</Link></div>
+        <div><strong>Secure one-time checkout</strong><p>₹299 for ten confirmed invoices. No recurring subscription.</p><Link className="button button-primary" href="/login">Start the Founder Plan</Link></div>
       </section>
       <footer>Internal codename: CashSathi · Public name pending formal clearance</footer>
     </main>

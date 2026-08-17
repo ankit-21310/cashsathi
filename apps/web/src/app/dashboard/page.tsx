@@ -70,7 +70,8 @@ export default function DashboardPage() {
         {me?.business && me.business.data_classification !== "REAL" && (
           <div className="data-banner"><strong>{humanize(me.business.data_classification)} data</strong><span>This workspace is excluded from real-customer impact claims.</span></div>
         )}
-        {plan && <div className="data-banner"><strong>Founder Plan · {plan.invoices_used}/{plan.invoice_limit}</strong><span>₹299 one-time · {humanize(plan.status)} · manual payment verified</span></div>}
+        {plan && <div className="data-banner"><strong>Founder Plan · {plan.invoices_used}/{plan.invoice_limit}</strong><span>₹299 one-time · {humanize(plan.status)} · {humanize(plan.source)} payment verified</span></div>}
+        {!plan && me?.business?.billing_access_mode === "REQUIRED" && <div className="data-banner billing-banner"><strong>Preview mode</strong><span>Review your first extraction, then activate the ₹299 Founder Plan before confirmation.</span><Link className="button button-secondary" href="/billing">View plan</Link></div>}
         <section className="metric-grid metric-grid-six" aria-label="Receivables metrics">
           <article><span>Monitored value</span><strong>{amount(primary?.monitored_minor)}</strong><small>{metrics?.invoice_count ?? 0} invoices</small></article>
           <article><span>Outstanding</span><strong>{amount(primary?.outstanding_minor)}</strong><small>{metrics?.overdue_count ?? 0} overdue</small></article>

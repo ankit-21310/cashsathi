@@ -29,6 +29,7 @@ playwright-report/
 *service-account*.json
 client_secret*.json
 application_default_credentials.json
+rzp-key.csv
 
 # Editors and operating systems
 .idea/

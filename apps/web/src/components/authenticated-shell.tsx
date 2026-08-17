@@ -69,6 +69,7 @@ export function AuthenticatedShell({ children }: { children: ReactNode }) {
   if (loading || !user) return <main className="centered-state">Checking your secure session…</main>;
 
   const canManage = account?.membership?.role === "OWNER" || account?.membership?.role === "ADMIN";
+  const isOwner = account?.membership?.role === "OWNER";
   const canViewFinance = canManage || account?.membership?.role === "ADVISOR";
   const moreIsActive = ["/integrations", "/settings", "/team", "/finance", "/privacy", "/admin"].some(
     (route) => pathname.startsWith(route),
@@ -137,12 +138,14 @@ export function AuthenticatedShell({ children }: { children: ReactNode }) {
                     {canManage && <Link href="/settings" onClick={closeNavigation}>Settings</Link>}
                     {canManage && <Link href="/team" onClick={closeNavigation}>Team</Link>}
                     {canViewFinance && <Link href="/finance" onClick={closeNavigation}>Finance</Link>}
+                    {isOwner && <Link href="/billing" onClick={closeNavigation}>Billing</Link>}
                   </div>
                 )}
                 <div className="nav-group">
                   <span>Trust &amp; safety</span>
                   <Link href="/privacy" onClick={closeNavigation}>Privacy</Link>
-                  {account?.is_platform_admin && <Link href="/admin/impact" onClick={closeNavigation}>Admin</Link>}
+                  {account?.is_platform_admin && <Link href="/admin/revenue" onClick={closeNavigation}>Revenue command</Link>}
+                  {account?.is_platform_admin && <Link href="/admin/impact" onClick={closeNavigation}>Impact evidence</Link>}
                 </div>
               </div>
             </div>

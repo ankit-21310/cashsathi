@@ -19,6 +19,11 @@ from cashsathi_api.domain import (
     ActionState,
     AgentRun,
     AuthenticatedUser,
+    BillingAccessMode,
+    BillingOrder,
+    BillingOrderStatus,
+    BillingTransaction,
+    BillingTransactionStatus,
     Business,
     BusinessRelationship,
     ConsentEventAction,
@@ -56,7 +61,10 @@ class Repository(Protocol):
     def get_account(self, user: AuthenticatedUser) -> tuple[Business | None, Membership | None]: ...
 
     def get_or_create_business(
-        self, user: AuthenticatedUser, name: str
+        self,
+        user: AuthenticatedUser,
+        name: str,
+        billing_access_mode: BillingAccessMode = BillingAccessMode.LEGACY,
     ) -> tuple[Business, Membership]: ...
 
     def require_tenant(self, user: AuthenticatedUser) -> TenantContext: ...
@@ -254,12 +262,56 @@ class Repository(Protocol):
         self, limit: int, cursor: str | None
     ) -> tuple[list[FounderPlanEnrollment], str | None]: ...
 
+    def get_billing_order_by_idempotency(
+        self, business_id: str, idempotency_key: str
+    ) -> BillingOrder | None: ...
+
+    def save_billing_order(self, order: BillingOrder) -> BillingOrder: ...
+
+    def get_billing_order_by_provider_id(self, provider_order_id: str) -> BillingOrder: ...
+
+    def list_billing_orders(self, business_id: str | None = None) -> list[BillingOrder]: ...
+
+    def get_billing_transaction(self, provider_payment_id: str) -> BillingTransaction | None: ...
+
+    def list_billing_transactions(
+        self, business_id: str | None = None
+    ) -> list[BillingTransaction]: ...
+
+    def record_billing_transaction(
+        self,
+        order: BillingOrder,
+        transaction: BillingTransaction,
+        enrollment: FounderPlanEnrollment | None,
+        ledger: EvidenceLedgerEntry | None,
+    ) -> tuple[BillingTransaction, FounderPlanEnrollment | None]: ...
+
+    def record_billing_refund(
+        self,
+        transaction: BillingTransaction,
+        enrollment: FounderPlanEnrollment | None,
+        ledger: EvidenceLedgerEntry | None,
+    ) -> tuple[BillingTransaction, FounderPlanEnrollment | None]: ...
+
+    def record_billing_webhook_event(
+        self,
+        event_id: str,
+        event_type: str,
+        entity_id: str | None,
+        processing_result: str,
+    ) -> bool: ...
+
     def delete_account(self, tenant: TenantContext, retain_anonymous_metrics: bool) -> None: ...
 
 
 def _business_id(uid: str) -> str:
     digest = hashlib.sha256(uid.encode("utf-8")).hexdigest()[:20]
     return f"biz_{digest}"
+
+
+def billing_order_id(business_id: str, idempotency_key: str) -> str:
+    digest = hashlib.sha256(f"{business_id}:{idempotency_key}".encode()).hexdigest()[:28]
+    return f"billord_{digest}"
 
 
 def _consent_id(tenant: TenantContext, version: str) -> str:
@@ -345,7 +397,10 @@ class FirestoreRepository:
         ), self._parse_membership(business_id, user.uid, member_snapshot.to_dict() or {})
 
     def get_or_create_business(
-        self, user: AuthenticatedUser, name: str
+        self,
+        user: AuthenticatedUser,
+        name: str,
+        billing_access_mode: BillingAccessMode = BillingAccessMode.LEGACY,
     ) -> tuple[Business, Membership]:
         existing = self.get_account(user)
         if existing[0] and existing[1]:
@@ -376,6 +431,7 @@ class FirestoreRepository:
                     "data_classification": DataClassification.UNCLASSIFIED.value,
                     "relationship": BusinessRelationship.UNCLASSIFIED.value,
                     "evidence_pseudonym": evidence_pseudonym,
+                    "billing_access_mode": billing_access_mode.value,
                 },
             )
             txn.set(
@@ -799,6 +855,7 @@ class FirestoreRepository:
             f"evt_invoice_confirmed_{invoice.id}"
         )
         plan_ref = self._client.collection("founder_plans").document(f"plan_{tenant.business_id}")
+        business_ref = self._business_ref(tenant)
         transaction = self._client.transaction()
 
         @google_firestore.transactional
@@ -816,8 +873,28 @@ class FirestoreRepository:
             if existing.exists:
                 return existing.to_dict() or {}
             plan_snapshot = plan_ref.get(transaction=txn)
+            business_snapshot = business_ref.get(transaction=txn)
+            business_data = business_snapshot.to_dict() or {}
+            billing_required = (
+                business_data.get("billing_access_mode", BillingAccessMode.LEGACY.value)
+                == BillingAccessMode.REQUIRED.value
+                and business_data.get("data_classification", DataClassification.UNCLASSIFIED.value)
+                != DataClassification.DEMO.value
+            )
+            if billing_required and not plan_snapshot.exists:
+                raise ApiError(
+                    402,
+                    "payment_required",
+                    "Purchase the Founder Recovery Plan before confirming this invoice.",
+                )
             if plan_snapshot.exists:
                 plan = FounderPlanEnrollment.model_validate(plan_snapshot.to_dict())
+                if plan.status == FounderPlanStatus.REFUNDED:
+                    raise ApiError(
+                        402,
+                        "payment_required",
+                        "The refunded Founder Recovery Plan cannot confirm more invoices.",
+                    )
                 if plan.invoices_used >= plan.invoice_limit:
                     raise ApiError(
                         409,
@@ -1945,6 +2022,211 @@ class FirestoreRepository:
             _cursor_encode(selected[-1].id) if len(snapshots) > limit and selected else None,
         )
 
+    def get_billing_order_by_idempotency(
+        self, business_id: str, idempotency_key: str
+    ) -> BillingOrder | None:
+        snapshot = (
+            self._client.collection("billing_orders")
+            .document(billing_order_id(business_id, idempotency_key))
+            .get()
+        )
+        return BillingOrder.model_validate(snapshot.to_dict()) if snapshot.exists else None
+
+    def save_billing_order(self, order: BillingOrder) -> BillingOrder:
+        ref = self._client.collection("billing_orders").document(order.id)
+        try:
+            ref.create(order.model_dump(mode="json"))
+        except Exception as exc:
+            snapshot = ref.get()
+            if snapshot.exists:
+                existing = BillingOrder.model_validate(snapshot.to_dict())
+                if existing.idempotency_key == order.idempotency_key:
+                    return existing
+            raise ApiError(
+                409, "billing_order_exists", "The billing order already exists."
+            ) from exc
+        return order
+
+    def get_billing_order_by_provider_id(self, provider_order_id: str) -> BillingOrder:
+        snapshots = list(
+            self._client.collection("billing_orders")
+            .where("provider_order_id", "==", provider_order_id)
+            .limit(1)
+            .stream()
+        )
+        if not snapshots:
+            raise ApiError(404, "billing_order_not_found", "The billing order was not found.")
+        return BillingOrder.model_validate(snapshots[0].to_dict())
+
+    def list_billing_orders(self, business_id: str | None = None) -> list[BillingOrder]:
+        query: Any = self._client.collection("billing_orders")
+        if business_id:
+            query = query.where("business_id", "==", business_id)
+        return sorted(
+            (BillingOrder.model_validate(snapshot.to_dict()) for snapshot in query.stream()),
+            key=lambda item: (item.created_at, item.id),
+            reverse=True,
+        )
+
+    def get_billing_transaction(self, provider_payment_id: str) -> BillingTransaction | None:
+        snapshot = (
+            self._client.collection("billing_transactions").document(provider_payment_id).get()
+        )
+        return BillingTransaction.model_validate(snapshot.to_dict()) if snapshot.exists else None
+
+    def list_billing_transactions(self, business_id: str | None = None) -> list[BillingTransaction]:
+        query: Any = self._client.collection("billing_transactions")
+        if business_id:
+            query = query.where("business_id", "==", business_id)
+        return sorted(
+            (BillingTransaction.model_validate(snapshot.to_dict()) for snapshot in query.stream()),
+            key=lambda item: (item.updated_at, item.id),
+            reverse=True,
+        )
+
+    def record_billing_transaction(
+        self,
+        order: BillingOrder,
+        transaction: BillingTransaction,
+        enrollment: FounderPlanEnrollment | None,
+        ledger: EvidenceLedgerEntry | None,
+    ) -> tuple[BillingTransaction, FounderPlanEnrollment | None]:
+        order_ref = self._client.collection("billing_orders").document(order.id)
+        payment_ref = self._client.collection("billing_transactions").document(transaction.id)
+        plan_ref = self._client.collection("founder_plans").document(f"plan_{order.business_id}")
+        ledger_ref = (
+            self._client.collection("evidence_ledger").document(ledger.id) if ledger else None
+        )
+        firestore_transaction = self._client.transaction(max_attempts=5)
+
+        @google_firestore.transactional
+        def record(txn: Any) -> tuple[dict[str, Any], dict[str, Any] | None]:
+            existing_payment = payment_ref.get(transaction=txn)
+            existing_plan = plan_ref.get(transaction=txn)
+            existing_ledger = ledger_ref.get(transaction=txn) if ledger_ref else None
+            current_payment = (
+                BillingTransaction.model_validate(existing_payment.to_dict())
+                if existing_payment.exists
+                else None
+            )
+            saved_payment = transaction
+            if (
+                current_payment
+                and current_payment.status
+                in {
+                    BillingTransactionStatus.CAPTURED,
+                    BillingTransactionStatus.PARTIALLY_REFUNDED,
+                    BillingTransactionStatus.REFUNDED,
+                }
+                and transaction.status == BillingTransactionStatus.FAILED
+            ):
+                saved_payment = current_payment
+            txn.set(payment_ref, saved_payment.model_dump(mode="json"), merge=True)
+            if saved_payment.status == BillingTransactionStatus.CAPTURED:
+                txn.set(
+                    order_ref,
+                    {
+                        "status": BillingOrderStatus.PAID.value,
+                        "updated_at": saved_payment.updated_at,
+                    },
+                    merge=True,
+                )
+            elif saved_payment.status == BillingTransactionStatus.FAILED:
+                txn.set(
+                    order_ref,
+                    {
+                        "status": BillingOrderStatus.ATTEMPTED.value,
+                        "updated_at": saved_payment.updated_at,
+                    },
+                    merge=True,
+                )
+            plan_data = existing_plan.to_dict() if existing_plan.exists else None
+            if enrollment and not existing_plan.exists:
+                txn.create(plan_ref, enrollment.model_dump(mode="json"))
+                plan_data = enrollment.model_dump(mode="json")
+                if (
+                    ledger
+                    and ledger_ref
+                    and existing_ledger is not None
+                    and not existing_ledger.exists
+                ):
+                    txn.create(ledger_ref, ledger.model_dump(mode="json"))
+            return saved_payment.model_dump(mode="json"), plan_data
+
+        payment_data, plan_data = record(firestore_transaction)
+        return (
+            BillingTransaction.model_validate(payment_data),
+            FounderPlanEnrollment.model_validate(plan_data) if plan_data else None,
+        )
+
+    def record_billing_refund(
+        self,
+        transaction: BillingTransaction,
+        enrollment: FounderPlanEnrollment | None,
+        ledger: EvidenceLedgerEntry | None,
+    ) -> tuple[BillingTransaction, FounderPlanEnrollment | None]:
+        payment_ref = self._client.collection("billing_transactions").document(transaction.id)
+        plan_ref = self._client.collection("founder_plans").document(
+            f"plan_{transaction.business_id}"
+        )
+        ledger_ref = (
+            self._client.collection("evidence_ledger").document(ledger.id) if ledger else None
+        )
+        firestore_transaction = self._client.transaction(max_attempts=5)
+
+        @google_firestore.transactional
+        def record(txn: Any) -> tuple[dict[str, Any], dict[str, Any] | None]:
+            existing_payment = payment_ref.get(transaction=txn)
+            existing_plan = plan_ref.get(transaction=txn)
+            existing_ledger = ledger_ref.get(transaction=txn) if ledger_ref else None
+            if not existing_payment.exists:
+                raise ApiError(
+                    404, "billing_payment_not_found", "The billing payment was not found."
+                )
+            current = BillingTransaction.model_validate(existing_payment.to_dict())
+            if transaction.amount_refunded_minor < current.amount_refunded_minor:
+                transaction_to_save = current
+            else:
+                transaction_to_save = transaction
+                txn.set(payment_ref, transaction.model_dump(mode="json"), merge=True)
+            plan_data = existing_plan.to_dict() if existing_plan.exists else None
+            if enrollment and existing_plan.exists:
+                txn.set(plan_ref, enrollment.model_dump(mode="json"), merge=True)
+                plan_data = enrollment.model_dump(mode="json")
+            if ledger and ledger_ref and existing_ledger is not None and not existing_ledger.exists:
+                txn.create(ledger_ref, ledger.model_dump(mode="json"))
+            return transaction_to_save.model_dump(mode="json"), plan_data
+
+        payment_data, plan_data = record(firestore_transaction)
+        return (
+            BillingTransaction.model_validate(payment_data),
+            FounderPlanEnrollment.model_validate(plan_data) if plan_data else None,
+        )
+
+    def record_billing_webhook_event(
+        self,
+        event_id: str,
+        event_type: str,
+        entity_id: str | None,
+        processing_result: str,
+    ) -> bool:
+        ref = self._client.collection("billing_webhook_events").document(event_id)
+        try:
+            ref.create(
+                {
+                    "event_id": event_id,
+                    "event_type": event_type,
+                    "entity_id": entity_id,
+                    "processing_result": processing_result,
+                    "processed_at": datetime.now(UTC),
+                }
+            )
+            return True
+        except Exception:
+            if ref.get().exists:
+                return False
+            raise
+
     def delete_account(self, tenant: TenantContext, retain_anonymous_metrics: bool) -> None:
         invoices = self.list_all_invoices(tenant)
         runs = self.list_all_agent_runs(tenant)
@@ -1992,6 +2274,23 @@ class FirestoreRepository:
             .stream()
         ):
             snapshot.reference.update({"linked_business_id": None, "updated_at": datetime.now(UTC)})
+        anonymized_business_id = (
+            f"deleted_{hashlib.sha256(tenant.business_id.encode()).hexdigest()[:16]}"
+        )
+        for snapshot in (
+            self._client.collection("billing_transactions")
+            .where("business_id", "==", tenant.business_id)
+            .stream()
+        ):
+            snapshot.reference.update({"business_id": None, "payer_email": None})
+        for snapshot in (
+            self._client.collection("billing_orders")
+            .where("business_id", "==", tenant.business_id)
+            .stream()
+        ):
+            snapshot.reference.update(
+                {"business_id": anonymized_business_id, "created_by": "deleted_account"}
+            )
         self._client.collection("founder_plans").document(f"plan_{tenant.business_id}").delete()
         self._client.collection("settings").document(tenant.business_id).delete()
         self._client.recursive_delete(self._business_ref(tenant))
@@ -2010,6 +2309,7 @@ class FirestoreRepository:
             data_classification=data.get("data_classification", DataClassification.UNCLASSIFIED),
             relationship=data.get("relationship", BusinessRelationship.UNCLASSIFIED),
             evidence_pseudonym=str(data.get("evidence_pseudonym", "")),
+            billing_access_mode=data.get("billing_access_mode", BillingAccessMode.LEGACY),
         )
 
     @staticmethod
@@ -2045,6 +2345,9 @@ class InMemoryRepository:
         self.prospects: dict[str, Prospect] = {}
         self.interviews: dict[str, Interview] = {}
         self.founder_plans: dict[str, FounderPlanEnrollment] = {}
+        self.billing_orders: dict[str, BillingOrder] = {}
+        self.billing_transactions: dict[str, BillingTransaction] = {}
+        self.billing_webhook_events: dict[str, dict[str, str | None]] = {}
         self.evidence_events: dict[str, dict[str, Any]] = {}
         self.policy_settings: dict[str, PolicyDefaults] = {}
         self._id_counter = 0
@@ -2063,7 +2366,10 @@ class InMemoryRepository:
         return self.businesses.get(membership.business_id), membership
 
     def get_or_create_business(
-        self, user: AuthenticatedUser, name: str
+        self,
+        user: AuthenticatedUser,
+        name: str,
+        billing_access_mode: BillingAccessMode = BillingAccessMode.LEGACY,
     ) -> tuple[Business, Membership]:
         existing = self.get_account(user)
         if existing[0] and existing[1]:
@@ -2076,6 +2382,7 @@ class InMemoryRepository:
             owner_user_id=user.uid,
             created_at=now,
             evidence_pseudonym=f"evid_{secrets.token_urlsafe(12)}",
+            billing_access_mode=billing_access_mode,
         )
         membership = Membership(
             business_id=business_id,
@@ -2365,7 +2672,24 @@ class InMemoryRepository:
                 )
             return existing
         plan = self.founder_plans.get(tenant.business_id)
+        business = self.businesses[tenant.business_id]
+        if (
+            business.billing_access_mode == BillingAccessMode.REQUIRED
+            and business.data_classification != DataClassification.DEMO
+            and plan is None
+        ):
+            raise ApiError(
+                402,
+                "payment_required",
+                "Purchase the Founder Recovery Plan before confirming this invoice.",
+            )
         if plan:
+            if plan.status == FounderPlanStatus.REFUNDED:
+                raise ApiError(
+                    402,
+                    "payment_required",
+                    "The refunded Founder Recovery Plan cannot confirm more invoices.",
+                )
             if plan.invoices_used >= plan.invoice_limit:
                 raise ApiError(
                     409,
@@ -3120,6 +3444,132 @@ class InMemoryRepository:
         )
         return self._page(plans, limit, cursor)
 
+    def get_billing_order_by_idempotency(
+        self, business_id: str, idempotency_key: str
+    ) -> BillingOrder | None:
+        return self.billing_orders.get(billing_order_id(business_id, idempotency_key))
+
+    def save_billing_order(self, order: BillingOrder) -> BillingOrder:
+        existing = self.billing_orders.get(order.id)
+        if existing:
+            if existing.idempotency_key == order.idempotency_key:
+                return existing
+            raise ApiError(409, "billing_order_exists", "The billing order already exists.")
+        self.billing_orders[order.id] = order
+        return order
+
+    def get_billing_order_by_provider_id(self, provider_order_id: str) -> BillingOrder:
+        order = next(
+            (
+                item
+                for item in self.billing_orders.values()
+                if item.provider_order_id == provider_order_id
+            ),
+            None,
+        )
+        if order is None:
+            raise ApiError(404, "billing_order_not_found", "The billing order was not found.")
+        return order
+
+    def list_billing_orders(self, business_id: str | None = None) -> list[BillingOrder]:
+        return sorted(
+            (
+                item
+                for item in self.billing_orders.values()
+                if business_id is None or item.business_id == business_id
+            ),
+            key=lambda item: (item.created_at, item.id),
+            reverse=True,
+        )
+
+    def get_billing_transaction(self, provider_payment_id: str) -> BillingTransaction | None:
+        return self.billing_transactions.get(provider_payment_id)
+
+    def list_billing_transactions(self, business_id: str | None = None) -> list[BillingTransaction]:
+        return sorted(
+            (
+                item
+                for item in self.billing_transactions.values()
+                if business_id is None or item.business_id == business_id
+            ),
+            key=lambda item: (item.updated_at, item.id),
+            reverse=True,
+        )
+
+    def record_billing_transaction(
+        self,
+        order: BillingOrder,
+        transaction: BillingTransaction,
+        enrollment: FounderPlanEnrollment | None,
+        ledger: EvidenceLedgerEntry | None,
+    ) -> tuple[BillingTransaction, FounderPlanEnrollment | None]:
+        current = self.billing_transactions.get(transaction.id)
+        if (
+            current
+            and current.status
+            in {
+                BillingTransactionStatus.CAPTURED,
+                BillingTransactionStatus.PARTIALLY_REFUNDED,
+                BillingTransactionStatus.REFUNDED,
+            }
+            and transaction.status == BillingTransactionStatus.FAILED
+        ):
+            transaction = current
+        self.billing_transactions[transaction.id] = transaction
+        self.billing_orders[order.id] = order.model_copy(
+            update={
+                "status": (
+                    BillingOrderStatus.PAID
+                    if transaction.status == BillingTransactionStatus.CAPTURED
+                    else BillingOrderStatus.ATTEMPTED
+                ),
+                "updated_at": transaction.updated_at,
+            }
+        )
+        plan = self.founder_plans.get(order.business_id)
+        if enrollment and plan is None:
+            plan = self.activate_founder_plan(enrollment, ledger) if ledger else enrollment
+            if ledger is None:
+                self.founder_plans[order.business_id] = enrollment
+        return transaction, plan
+
+    def record_billing_refund(
+        self,
+        transaction: BillingTransaction,
+        enrollment: FounderPlanEnrollment | None,
+        ledger: EvidenceLedgerEntry | None,
+    ) -> tuple[BillingTransaction, FounderPlanEnrollment | None]:
+        current = self.billing_transactions.get(transaction.id)
+        if current is None:
+            raise ApiError(404, "billing_payment_not_found", "The billing payment was not found.")
+        if transaction.amount_refunded_minor >= current.amount_refunded_minor:
+            self.billing_transactions[transaction.id] = transaction
+        else:
+            transaction = current
+        plan = self.founder_plans.get(str(transaction.business_id))
+        if enrollment and plan:
+            self.founder_plans[enrollment.business_id] = enrollment
+            plan = enrollment
+        if ledger and ledger.id not in self.ledger_entries:
+            self.ledger_entries[ledger.id] = ledger
+        return transaction, plan
+
+    def record_billing_webhook_event(
+        self,
+        event_id: str,
+        event_type: str,
+        entity_id: str | None,
+        processing_result: str,
+    ) -> bool:
+        if event_id in self.billing_webhook_events:
+            return False
+        self.billing_webhook_events[event_id] = {
+            "event_type": event_type,
+            "entity_id": entity_id,
+            "processing_result": processing_result,
+        }
+        return True
+
     def delete_account(self, tenant: TenantContext, retain_anonymous_metrics: bool) -> None:
         invoice_ids = {
             invoice.id
@@ -3142,6 +3592,22 @@ class InMemoryRepository:
                         "reference": (
                             f"sha256:{hashlib.sha256(entry.reference.encode()).hexdigest()}"
                         ),
+                    }
+                )
+        for payment_id, payment in list(self.billing_transactions.items()):
+            if payment.business_id == tenant.business_id:
+                self.billing_transactions[payment_id] = payment.model_copy(
+                    update={"business_id": None, "payer_email": None}
+                )
+        anonymized_business_id = (
+            f"deleted_{hashlib.sha256(tenant.business_id.encode()).hexdigest()[:16]}"
+        )
+        for order_id, order in list(self.billing_orders.items()):
+            if order.business_id == tenant.business_id:
+                self.billing_orders[order_id] = order.model_copy(
+                    update={
+                        "business_id": anonymized_business_id,
+                        "created_by": "deleted_account",
                     }
                 )
         for prospect_id, prospect in list(self.prospects.items()):

@@ -13,12 +13,12 @@ const firebaseEmulatorOrigin =
     : "";
 const csp = [
   "default-src 'self'",
-  `script-src 'self' 'unsafe-inline' https://apis.google.com${isDevelopment ? " 'unsafe-eval'" : ""}`,
+  `script-src 'self' 'unsafe-inline' https://apis.google.com https://checkout.razorpay.com${isDevelopment ? " 'unsafe-eval'" : ""}`,
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: https:",
   "font-src 'self' data:",
-  `connect-src 'self' ${apiOrigin} https://${firebaseAuthDomain} ${firebaseOrigins}${firebaseEmulatorOrigin} https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://www.googleapis.com`,
-  `frame-src https://accounts.google.com https://apis.google.com https://${firebaseAuthDomain}${firebaseEmulatorOrigin}`,
+  `connect-src 'self' ${apiOrigin} https://${firebaseAuthDomain} ${firebaseOrigins}${firebaseEmulatorOrigin} https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://www.googleapis.com https://api.razorpay.com https://checkout.razorpay.com`,
+  `frame-src https://accounts.google.com https://apis.google.com https://${firebaseAuthDomain}${firebaseEmulatorOrigin} https://api.razorpay.com https://checkout.razorpay.com`,
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",

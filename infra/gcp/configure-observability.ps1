@@ -25,6 +25,7 @@ Ensure-LogMetric "cashsathi_schema_model_failure" "Gemini schema or model failur
 Ensure-LogMetric "cashsathi_gmail_failure" "Gmail definite or ambiguous failures" 'resource.type="cloud_run_revision" AND jsonPayload.category="gmail_failure"'
 Ensure-LogMetric "cashsathi_scheduler_failure" "CashSathi scheduler failures" 'resource.type="cloud_run_revision" AND jsonPayload.category="scheduler_failure"'
 Ensure-LogMetric "cashsathi_scheduler_success" "CashSathi scheduler success heartbeat" 'resource.type="cloud_run_revision" AND jsonPayload.category="scheduler_success"'
+Ensure-LogMetric "cashsathi_billing_failure" "CashSathi billing provider or verification failures" 'resource.type="cloud_run_revision" AND (jsonPayload.category="billing_provider_failure" OR jsonPayload.category="billing_verification_failure")'
 
 $channel = gcloud beta monitoring channels list --filter "type=email AND labels.email_address=$NotificationEmail" --format "value(name)" --limit 1
 if (-not $channel) {
@@ -95,6 +96,7 @@ Ensure-Policy "CashSathi API 5xx spike" (Metric-Condition "3 or more API 5xx in 
 Ensure-Policy "CashSathi Gemini failure spike" (Metric-Condition "2 or more schema/model failures in 15 minutes" "cashsathi_schema_model_failure" 1 "900s")
 Ensure-Policy "CashSathi Gmail failure" (Metric-Condition "Any Gmail failure" "cashsathi_gmail_failure" 0 "300s")
 Ensure-Policy "CashSathi scheduler failure" (Metric-Condition "Any scheduler failure" "cashsathi_scheduler_failure" 0 "300s")
+Ensure-Policy "CashSathi billing failure" (Metric-Condition "Any billing failure" "cashsathi_billing_failure" 0 "300s")
 Ensure-Policy "CashSathi scheduler heartbeat missing" @{
   displayName = "No scheduler success for two hours"
   conditionAbsent = @{

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import hashlib
+import io
 import json
 import secrets
 from collections import defaultdict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Annotated
 from uuid import uuid4
 
@@ -24,6 +26,12 @@ from cashsathi_api.auth import (
     FirebaseAccountAuthManager,
     FirebaseAuthVerifier,
     authenticated_user,
+)
+from cashsathi_api.billing import (
+    PaymentGateway,
+    ProviderPayment,
+    RazorpayGateway,
+    provider_payment_from_payload,
 )
 from cashsathi_api.config import Settings, get_settings
 from cashsathi_api.decisioning import (
@@ -46,16 +54,29 @@ from cashsathi_api.domain import (
     AgentRunPage,
     AuthenticatedUser,
     AutomationUpdate,
+    BillingAccessMode,
+    BillingCheckoutOrder,
+    BillingConfirm,
+    BillingConfirmation,
+    BillingCurrent,
+    BillingOrder,
+    BillingOrderCreate,
+    BillingOrderStatus,
+    BillingProvider,
+    BillingTransaction,
+    BillingTransactionStatus,
     Business,
     BusinessClassificationUpdate,
     BusinessCreate,
     BusinessPage,
+    BusinessRelationship,
     CashForecast,
     ConsentAccept,
     ConsentEventAction,
     ConsentStatus,
     CustomerPolicyUpdate,
     CustomerSnapshot,
+    DataClassification,
     DisputeCreate,
     DisputeResolve,
     ErrorEnvelope,
@@ -110,6 +131,11 @@ from cashsathi_api.domain import (
     ProspectUpdate,
     RecheckResult,
     RestrictivePolicyUpdate,
+    RevenueCustomer,
+    RevenueCustomerPage,
+    RevenuePaymentDetail,
+    RevenuePaymentPage,
+    RevenueSummary,
     TeamInvitation,
     TeamInvitationCreate,
     TeamInvitationPage,
@@ -159,7 +185,7 @@ from cashsathi_api.phase67 import (
     optional_consent_response,
     statement_hash,
 )
-from cashsathi_api.repository import FirestoreRepository, Repository
+from cashsathi_api.repository import FirestoreRepository, Repository, billing_order_id
 from cashsathi_api.request_guards import RequestGuardsMiddleware
 from cashsathi_api.scheduler_auth import (
     GoogleSchedulerVerifier,
@@ -177,6 +203,225 @@ PRODUCT_CONSENT_STATEMENT = (
     "customer relationships, disputes, and payment confirmation."
 )
 PRODUCT_CONSENT_HASH = hashlib.sha256(PRODUCT_CONSENT_STATEMENT.encode()).hexdigest()
+FOUNDER_PLAN_AMOUNT_MINOR = 29_900
+FOUNDER_PLAN_CURRENCY = "INR"
+
+
+def _gateway_from(request: Request) -> PaymentGateway:
+    gateway: PaymentGateway | None = request.app.state.payment_gateway
+    if gateway is None:
+        raise ApiError(503, "billing_not_configured", "Payment checkout is not configured.")
+    return gateway
+
+
+def _transaction_from_provider(
+    order: BillingOrder, payment: ProviderPayment, now: datetime
+) -> BillingTransaction:
+    status_map = {
+        "authorized": BillingTransactionStatus.AUTHORIZED,
+        "captured": BillingTransactionStatus.CAPTURED,
+        "failed": BillingTransactionStatus.FAILED,
+    }
+    status = status_map.get(payment.status.casefold(), BillingTransactionStatus.AUTHORIZED)
+    if payment.amount_refunded >= payment.amount and payment.amount > 0:
+        status = BillingTransactionStatus.REFUNDED
+    elif payment.amount_refunded > 0:
+        status = BillingTransactionStatus.PARTIALLY_REFUNDED
+    provider_created = (
+        datetime.fromtimestamp(payment.created_at, UTC) if payment.created_at > 0 else now
+    )
+    return BillingTransaction(
+        id=payment.id,
+        business_id=order.business_id,
+        billing_order_id=order.id,
+        provider=BillingProvider.RAZORPAY,
+        provider_payment_id=payment.id,
+        provider_order_id=payment.order_id,
+        amount_minor=payment.amount,
+        currency=payment.currency,
+        amount_refunded_minor=payment.amount_refunded,
+        provider_fee_minor=payment.fee,
+        provider_tax_minor=payment.tax,
+        payment_method=payment.method,
+        payer_email=payment.email,
+        status=status,
+        failure_code=payment.error_code,
+        failure_description=payment.error_description,
+        captured_at=now if status == BillingTransactionStatus.CAPTURED else None,
+        refunded_at=(
+            now
+            if status
+            in {BillingTransactionStatus.PARTIALLY_REFUNDED, BillingTransactionStatus.REFUNDED}
+            else None
+        ),
+        created_at=provider_created,
+        updated_at=now,
+    )
+
+
+def _validate_provider_payment(order: BillingOrder, payment: ProviderPayment) -> None:
+    if payment.order_id != order.provider_order_id:
+        structlog.get_logger("billing").warning(
+            "payment_order_mismatch", category="billing_verification_failure"
+        )
+        raise ApiError(422, "payment_order_mismatch", "The payment does not match this order.")
+    if payment.amount != order.amount_minor or payment.currency != order.currency:
+        structlog.get_logger("billing").warning(
+            "payment_amount_mismatch", category="billing_verification_failure"
+        )
+        raise ApiError(422, "payment_amount_mismatch", "The payment amount or currency is invalid.")
+
+
+def _record_provider_payment(
+    repo: Repository, order: BillingOrder, payment: ProviderPayment
+) -> tuple[BillingTransaction, FounderPlanEnrollment | None]:
+    _validate_provider_payment(order, payment)
+    now = datetime.now(UTC)
+    transaction = _transaction_from_provider(order, payment, now)
+    existing = repo.get_billing_transaction(payment.id)
+    if existing:
+        transaction = transaction.model_copy(
+            update={
+                "created_at": existing.created_at,
+                "captured_at": existing.captured_at or transaction.captured_at,
+                "payer_email": transaction.payer_email or existing.payer_email,
+            }
+        )
+    enrollment: FounderPlanEnrollment | None = None
+    ledger: EvidenceLedgerEntry | None = None
+    if transaction.status == BillingTransactionStatus.CAPTURED:
+        enrollment = FounderPlanEnrollment(
+            id=f"plan_{order.business_id}",
+            business_id=order.business_id,
+            status=FounderPlanStatus.ACTIVE,
+            invoices_used=0,
+            ledger_entry_id=f"ledger_billing_{hashlib.sha256(payment.id.encode()).hexdigest()[:24]}",
+            receipt_reference=payment.id,
+            idempotency_key=order.idempotency_key,
+            activated_by=order.created_by,
+            activated_at=now,
+            source=BillingProvider.RAZORPAY,
+            provider_order_id=order.provider_order_id,
+            provider_payment_id=payment.id,
+        )
+        ledger = EvidenceLedgerEntry(
+            id=enrollment.ledger_entry_id,
+            kind="PRODUCT_REVENUE",
+            amount_minor=FOUNDER_PLAN_AMOUNT_MINOR,
+            currency=FOUNDER_PLAN_CURRENCY,
+            occurred_on=now.date(),
+            category="Founder Recovery Plan",
+            reference=payment.id,
+            business_id=order.business_id,
+            marketing=False,
+            reversal_of=None,
+            created_by=order.created_by,
+            created_at=now,
+        )
+    if transaction.status in {
+        BillingTransactionStatus.PARTIALLY_REFUNDED,
+        BillingTransactionStatus.REFUNDED,
+    }:
+        previous_refund = existing.amount_refunded_minor if existing else 0
+        refund_delta = max(transaction.amount_refunded_minor - previous_refund, 0)
+        plan = repo.get_founder_plan(order.business_id)
+        if transaction.status == BillingTransactionStatus.REFUNDED and plan:
+            enrollment = plan.model_copy(
+                update={"status": FounderPlanStatus.REFUNDED, "refunded_at": now}
+            )
+        if refund_delta:
+            ledger = EvidenceLedgerEntry(
+                id=(
+                    "ledger_refund_"
+                    + hashlib.sha256(
+                        f"{payment.id}:{transaction.amount_refunded_minor}".encode()
+                    ).hexdigest()[:24]
+                ),
+                kind="PRODUCT_REFUND",
+                amount_minor=refund_delta,
+                currency=transaction.currency,
+                occurred_on=now.date(),
+                category="Founder Recovery Plan refund",
+                reference=payment.id,
+                business_id=order.business_id,
+                marketing=False,
+                reversal_of=None,
+                created_by="razorpay_webhook",
+                created_at=now,
+            )
+        result = repo.record_billing_refund(transaction, enrollment, ledger)
+        structlog.get_logger("billing").info(
+            "billing_refund_recorded",
+            category="billing_refund",
+            payment_id=transaction.provider_payment_id,
+            status=transaction.status.value,
+        )
+        return result
+    result = repo.record_billing_transaction(order, transaction, enrollment, ledger)
+    structlog.get_logger("billing").info(
+        "billing_payment_recorded",
+        category=(
+            "billing_capture"
+            if transaction.status == BillingTransactionStatus.CAPTURED
+            else "billing_attempt"
+        ),
+        payment_id=transaction.provider_payment_id,
+        status=transaction.status.value,
+    )
+    return result
+
+
+def _filter_revenue_transactions(
+    repo: Repository,
+    *,
+    from_date: date | None,
+    to_date: date | None,
+    status: BillingTransactionStatus | None,
+    payment_method: str | None,
+    data_classification: DataClassification | None,
+    relationship: BusinessRelationship | None,
+    query: str | None,
+) -> list[BillingTransaction]:
+    businesses = {business.id: business for business in repo.list_businesses()}
+    normalized_query = query.strip().casefold() if query else None
+    selected: list[BillingTransaction] = []
+    for transaction in repo.list_billing_transactions():
+        business = businesses.get(transaction.business_id or "")
+        occurred_at = transaction.captured_at or transaction.created_at
+        if from_date and occurred_at.date() < from_date:
+            continue
+        if to_date and occurred_at.date() > to_date:
+            continue
+        if status and transaction.status != status:
+            continue
+        if payment_method and transaction.payment_method != payment_method:
+            continue
+        if data_classification and (
+            business is None or business.data_classification != data_classification
+        ):
+            continue
+        if relationship and (business is None or business.relationship != relationship):
+            continue
+        if normalized_query and normalized_query not in " ".join(
+            [
+                business.name.casefold() if business else "",
+                str(transaction.payer_email or "").casefold(),
+                transaction.provider_payment_id.casefold(),
+            ]
+        ):
+            continue
+        selected.append(transaction)
+    return selected
+
+
+def _all_founder_plans(repo: Repository) -> list[FounderPlanEnrollment]:
+    plans: list[FounderPlanEnrollment] = []
+    cursor: str | None = None
+    while True:
+        page, cursor = repo.list_founder_plans(100, cursor)
+        plans.extend(page)
+        if cursor is None:
+            return plans
 
 
 def repository_from(request: Request) -> Repository:
@@ -337,6 +582,7 @@ def create_app(
     token_cipher: TokenCipher | None = None,
     scheduler_verifier: SchedulerVerifier | None = None,
     account_auth_manager: AccountAuthManager | None = None,
+    payment_gateway: PaymentGateway | None = None,
 ) -> FastAPI:
     runtime_settings = settings or get_settings()
     configure_logging(runtime_settings)
@@ -348,6 +594,12 @@ def create_app(
         application.state.account_auth_manager = (
             account_auth_manager or FirebaseAccountAuthManager()
         )
+        if payment_gateway is not None:
+            application.state.payment_gateway = payment_gateway
+        elif runtime_settings.razorpay_key_id and runtime_settings.razorpay_key_secret:
+            application.state.payment_gateway = RazorpayGateway(runtime_settings)
+        else:
+            application.state.payment_gateway = None
         if invoice_extractor is not None:
             application.state.invoice_extractor = invoice_extractor
         elif runtime_settings.local_emulators_enabled:
@@ -573,7 +825,15 @@ def create_app(
     def create_business(
         payload: BusinessCreate, user: UserDependency, repo: RepositoryDependency
     ) -> Business:
-        business, _membership = repo.get_or_create_business(user, payload.name)
+        business, _membership = repo.get_or_create_business(
+            user,
+            payload.name,
+            (
+                BillingAccessMode.REQUIRED
+                if runtime_settings.billing_enforcement_enabled
+                else BillingAccessMode.LEGACY
+            ),
+        )
         return business
 
     @application.get("/api/businesses/current", response_model=Business, tags=["businesses"])
@@ -807,6 +1067,177 @@ def create_app(
     ) -> FounderPlanEnrollment | None:
         tenant = repo.require_tenant(user)
         return repo.get_founder_plan(tenant.business_id)
+
+    @application.post("/api/billing/orders", response_model=BillingCheckoutOrder, tags=["billing"])
+    def create_billing_order(
+        payload: BillingOrderCreate,
+        request: Request,
+        user: UserDependency,
+        repo: RepositoryDependency,
+    ) -> BillingCheckoutOrder:
+        tenant = repo.require_tenant(user)
+        require_membership_role(tenant, MembershipRole.OWNER)
+        business, _membership = repo.get_account(user)
+        if business is None:
+            raise ApiError(404, "business_not_found", "Complete business onboarding first.")
+        if repo.get_founder_plan(tenant.business_id) is not None:
+            raise ApiError(409, "plan_already_owned", "This workspace already has a Founder Plan.")
+        existing = repo.get_billing_order_by_idempotency(
+            tenant.business_id, payload.idempotency_key
+        )
+        if existing is None:
+            existing = next(
+                (
+                    item
+                    for item in repo.list_billing_orders(tenant.business_id)
+                    if item.provider == BillingProvider.RAZORPAY
+                    and item.status in {BillingOrderStatus.CREATED, BillingOrderStatus.ATTEMPTED}
+                ),
+                None,
+            )
+        gateway = _gateway_from(request)
+        if existing is None:
+            internal_id = billing_order_id(tenant.business_id, payload.idempotency_key)
+            provider_order = gateway.create_or_find_order(
+                amount_minor=FOUNDER_PLAN_AMOUNT_MINOR,
+                currency=FOUNDER_PLAN_CURRENCY,
+                receipt=internal_id,
+                billing_order_id=internal_id,
+            )
+            now = datetime.now(UTC)
+            provider_status = {
+                "paid": BillingOrderStatus.PAID,
+                "attempted": BillingOrderStatus.ATTEMPTED,
+            }.get(provider_order.status.casefold(), BillingOrderStatus.CREATED)
+            existing = repo.save_billing_order(
+                BillingOrder(
+                    id=internal_id,
+                    business_id=tenant.business_id,
+                    provider_order_id=provider_order.id,
+                    receipt=internal_id,
+                    idempotency_key=payload.idempotency_key,
+                    status=provider_status,
+                    created_by=user.uid,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        return BillingCheckoutOrder(
+            order=existing,
+            public_key_id=gateway.public_key_id,
+            business_name=business.name,
+            customer_email=user.email,
+        )
+
+    @application.post("/api/billing/confirm", response_model=BillingConfirmation, tags=["billing"])
+    def confirm_billing_payment(
+        payload: BillingConfirm,
+        request: Request,
+        user: UserDependency,
+        repo: RepositoryDependency,
+    ) -> BillingConfirmation:
+        tenant = repo.require_tenant(user)
+        require_membership_role(tenant, MembershipRole.OWNER)
+        order = repo.get_billing_order_by_provider_id(payload.provider_order_id)
+        if order.business_id != tenant.business_id:
+            raise ApiError(404, "billing_order_not_found", "The billing order was not found.")
+        if order.provider_order_id is None or order.provider != BillingProvider.RAZORPAY:
+            raise ApiError(
+                422, "invalid_billing_order", "The billing order cannot be confirmed online."
+            )
+        gateway = _gateway_from(request)
+        if not gateway.verify_checkout_signature(
+            order_id=order.provider_order_id,
+            payment_id=payload.provider_payment_id,
+            signature=payload.signature,
+        ):
+            raise ApiError(422, "invalid_payment_signature", "Payment verification failed.")
+        payment = gateway.fetch_payment(payload.provider_payment_id)
+        transaction, plan = _record_provider_payment(repo, order, payment)
+        if transaction.status == BillingTransactionStatus.FAILED:
+            raise ApiError(409, "payment_failed", "The payment was not captured.")
+        return BillingConfirmation(
+            status=(
+                "CAPTURED"
+                if transaction.status == BillingTransactionStatus.CAPTURED
+                else "PROCESSING"
+            ),
+            transaction=transaction,
+            plan=plan,
+        )
+
+    @application.get("/api/billing/current", response_model=BillingCurrent, tags=["billing"])
+    def current_billing(user: UserDependency, repo: RepositoryDependency) -> BillingCurrent:
+        tenant = repo.require_tenant(user)
+        require_membership_role(tenant, MembershipRole.OWNER)
+        business, _membership = repo.get_account(user)
+        if business is None:
+            raise ApiError(404, "business_not_found", "Complete business onboarding first.")
+        plan = repo.get_founder_plan(tenant.business_id)
+        orders = repo.list_billing_orders(tenant.business_id)
+        transactions = repo.list_billing_transactions(tenant.business_id)
+        required = (
+            business.billing_access_mode == BillingAccessMode.REQUIRED
+            and business.data_classification != DataClassification.DEMO
+        )
+        return BillingCurrent(
+            billing_access_mode=business.billing_access_mode,
+            payment_required=required
+            and (plan is None or plan.status == FounderPlanStatus.REFUNDED),
+            plan=plan,
+            latest_order=orders[0] if orders else None,
+            transactions=transactions[:20],
+        )
+
+    @application.post("/api/webhooks/razorpay", tags=["billing"])
+    async def razorpay_webhook(
+        request: Request,
+        repo: RepositoryDependency,
+        signature: Annotated[str | None, Header(alias="X-Razorpay-Signature")] = None,
+        event_id: Annotated[str | None, Header(alias="X-Razorpay-Event-Id")] = None,
+    ) -> dict[str, bool]:
+        if not signature or not event_id:
+            raise ApiError(401, "webhook_signature_required", "Webhook authentication failed.")
+        body = await request.body()
+        gateway = _gateway_from(request)
+        if not gateway.verify_webhook_signature(body, signature):
+            structlog.get_logger("billing").warning("invalid_webhook_signature")
+            raise ApiError(401, "invalid_webhook_signature", "Webhook authentication failed.")
+        try:
+            payload = json.loads(body)
+        except (TypeError, ValueError):
+            raise ApiError(
+                422, "invalid_webhook_payload", "The webhook payload is invalid."
+            ) from None
+        event_type = str(payload.get("event", ""))
+        if event_type not in {"payment.captured", "payment.failed", "refund.processed"}:
+            created = repo.record_billing_webhook_event(event_id, event_type, None, "IGNORED")
+            if not created:
+                structlog.get_logger("billing").info(
+                    "duplicate_webhook_event", category="billing_duplicate_event"
+                )
+            return {"accepted": True}
+        payment_entity = payload.get("payload", {}).get("payment", {}).get("entity")
+        if isinstance(payment_entity, dict):
+            payment = provider_payment_from_payload(payment_entity)
+        elif event_type == "refund.processed":
+            refund_entity = payload.get("payload", {}).get("refund", {}).get("entity")
+            payment_id = (
+                refund_entity.get("payment_id") if isinstance(refund_entity, dict) else None
+            )
+            if not isinstance(payment_id, str):
+                raise ApiError(422, "payment_entity_missing", "The webhook payment is missing.")
+            payment = gateway.fetch_payment(payment_id)
+        else:
+            raise ApiError(422, "payment_entity_missing", "The webhook payment is missing.")
+        order = repo.get_billing_order_by_provider_id(payment.order_id)
+        _record_provider_payment(repo, order, payment)
+        created = repo.record_billing_webhook_event(event_id, event_type, payment.id, "PROCESSED")
+        if not created:
+            structlog.get_logger("billing").info(
+                "duplicate_webhook_event", category="billing_duplicate_event"
+            )
+        return {"accepted": True}
 
     @application.post("/api/invoices/extract", response_model=ExtractionResult, tags=["invoices"])
     async def extract_invoice(
@@ -1770,7 +2201,37 @@ def create_app(
             created_by=user.uid,
             created_at=now,
         )
-        return repo.activate_founder_plan(enrollment, ledger)
+        activated = repo.activate_founder_plan(enrollment, ledger)
+        manual_order = repo.save_billing_order(
+            BillingOrder(
+                id=f"billord_manual_{business.id}",
+                business_id=business.id,
+                provider=BillingProvider.MANUAL,
+                provider_order_id=None,
+                receipt=ledger_id[:40],
+                idempotency_key=payload.idempotency_key,
+                status=BillingOrderStatus.PAID,
+                created_by=user.uid,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        manual_transaction = BillingTransaction(
+            id=f"manual_{ledger_digest}",
+            business_id=business.id,
+            billing_order_id=manual_order.id,
+            provider=BillingProvider.MANUAL,
+            provider_payment_id=f"manual_{ledger_digest}",
+            provider_order_id=None,
+            amount_minor=FOUNDER_PLAN_AMOUNT_MINOR,
+            currency=FOUNDER_PLAN_CURRENCY,
+            status=BillingTransactionStatus.CAPTURED,
+            captured_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+        repo.record_billing_transaction(manual_order, manual_transaction, None, None)
+        return activated
 
     @application.get("/api/admin/evidence-export", tags=["admin"])
     def admin_evidence_export(user: UserDependency, repo: RepositoryDependency) -> Response:
@@ -1781,6 +2242,284 @@ def create_app(
             content=archive,
             media_type="application/zip",
             headers={"Content-Disposition": 'attachment; filename="cashsathi-evidence.zip"'},
+        )
+
+    @application.get("/api/admin/revenue/summary", response_model=RevenueSummary, tags=["admin"])
+    def revenue_summary(
+        user: UserDependency,
+        repo: RepositoryDependency,
+        from_date: date | None = None,
+        to_date: date | None = None,
+        status: BillingTransactionStatus | None = None,
+        payment_method: Annotated[str | None, Query(max_length=50)] = None,
+        data_classification: DataClassification | None = None,
+        relationship: BusinessRelationship | None = None,
+        q: Annotated[str | None, Query(max_length=100)] = None,
+    ) -> RevenueSummary:
+        require_admin(user, runtime_settings)
+        transactions = _filter_revenue_transactions(
+            repo,
+            from_date=from_date,
+            to_date=to_date,
+            status=status,
+            payment_method=payment_method,
+            data_classification=data_classification,
+            relationship=relationship,
+            query=q,
+        )
+        captured_states = {
+            BillingTransactionStatus.CAPTURED,
+            BillingTransactionStatus.PARTIALLY_REFUNDED,
+            BillingTransactionStatus.REFUNDED,
+        }
+        captured = [item for item in transactions if item.status in captured_states]
+        gross = sum(item.amount_minor for item in captured)
+        refunded = sum(item.amount_refunded_minor for item in captured)
+        plan_business_ids = {item.business_id for item in transactions if item.business_id}
+        plans = [
+            plan
+            for plan in _all_founder_plans(repo)
+            if not plan_business_ids or plan.business_id in plan_business_ids
+        ]
+        return RevenueSummary(
+            gross_captured_minor=gross,
+            refunded_minor=refunded,
+            net_captured_minor=gross - refunded,
+            provider_fees_minor=sum(item.provider_fee_minor for item in captured),
+            provider_tax_minor=sum(item.provider_tax_minor for item in captured),
+            paying_businesses=len(
+                {
+                    item.business_id
+                    for item in captured
+                    if item.business_id and item.amount_minor > item.amount_refunded_minor
+                }
+            ),
+            capture_rate=(len(captured) / len(transactions) if transactions else 0),
+            active_plans=sum(1 for plan in plans if plan.status == FounderPlanStatus.ACTIVE),
+            exhausted_plans=sum(1 for plan in plans if plan.status == FounderPlanStatus.EXHAUSTED),
+            refunded_plans=sum(1 for plan in plans if plan.status == FounderPlanStatus.REFUNDED),
+        )
+
+    @application.get(
+        "/api/admin/revenue/customers", response_model=RevenueCustomerPage, tags=["admin"]
+    )
+    def revenue_customers(
+        user: UserDependency,
+        repo: RepositoryDependency,
+        from_date: date | None = None,
+        to_date: date | None = None,
+        status: BillingTransactionStatus | None = None,
+        payment_method: Annotated[str | None, Query(max_length=50)] = None,
+        data_classification: DataClassification | None = None,
+        relationship: BusinessRelationship | None = None,
+        q: Annotated[str | None, Query(max_length=100)] = None,
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+        cursor: Annotated[str | None, Query(max_length=20)] = None,
+    ) -> RevenueCustomerPage:
+        require_admin(user, runtime_settings)
+        transactions = _filter_revenue_transactions(
+            repo,
+            from_date=from_date,
+            to_date=to_date,
+            status=status,
+            payment_method=payment_method,
+            data_classification=data_classification,
+            relationship=relationship,
+            query=q,
+        )
+        by_business: dict[str, list[BillingTransaction]] = defaultdict(list)
+        for transaction in transactions:
+            if transaction.business_id:
+                by_business[transaction.business_id].append(transaction)
+        plans = _all_founder_plans(repo)
+        plans_by_business = {plan.business_id: plan for plan in plans}
+        normalized_query = q.strip().casefold() if q else None
+        items: list[RevenueCustomer] = []
+        filters_transactions = any(
+            [from_date, to_date, status, payment_method, data_classification, relationship]
+        )
+        for business in repo.list_businesses():
+            business_transactions = by_business.get(business.id, [])
+            if filters_transactions and not business_transactions:
+                continue
+            latest = business_transactions[0] if business_transactions else None
+            payer_email = next(
+                (item.payer_email for item in business_transactions if item.payer_email), None
+            )
+            if (
+                normalized_query
+                and normalized_query
+                not in " ".join(
+                    [
+                        business.name,
+                        str(payer_email or ""),
+                        *(item.provider_payment_id for item in business_transactions),
+                    ]
+                ).casefold()
+            ):
+                continue
+            captured = [
+                item
+                for item in business_transactions
+                if item.status
+                in {
+                    BillingTransactionStatus.CAPTURED,
+                    BillingTransactionStatus.PARTIALLY_REFUNDED,
+                    BillingTransactionStatus.REFUNDED,
+                }
+            ]
+            plan = plans_by_business.get(business.id)
+            items.append(
+                RevenueCustomer(
+                    business_id=business.id,
+                    business_name=business.name,
+                    payer_email=payer_email,
+                    data_classification=business.data_classification,
+                    relationship=business.relationship,
+                    payment_status=latest.status if latest else None,
+                    payment_method=latest.payment_method if latest else None,
+                    captured_at=latest.captured_at if latest else None,
+                    gross_captured_minor=sum(item.amount_minor for item in captured),
+                    refunded_minor=sum(item.amount_refunded_minor for item in captured),
+                    plan_status=plan.status if plan else None,
+                    invoices_used=plan.invoices_used if plan else 0,
+                    invoice_limit=plan.invoice_limit if plan else 10,
+                )
+            )
+        items.sort(
+            key=lambda item: item.captured_at or datetime.min.replace(tzinfo=UTC), reverse=True
+        )
+        try:
+            start = int(cursor or "0")
+        except ValueError:
+            raise ApiError(422, "invalid_cursor", "The pagination cursor is invalid.") from None
+        selected = items[start : start + limit]
+        next_cursor = str(start + limit) if start + limit < len(items) else None
+        return RevenueCustomerPage(items=selected, next_cursor=next_cursor)
+
+    @application.get(
+        "/api/admin/revenue/payments", response_model=RevenuePaymentPage, tags=["admin"]
+    )
+    def revenue_payments(
+        user: UserDependency,
+        repo: RepositoryDependency,
+        from_date: date | None = None,
+        to_date: date | None = None,
+        status: BillingTransactionStatus | None = None,
+        payment_method: Annotated[str | None, Query(max_length=50)] = None,
+        data_classification: DataClassification | None = None,
+        relationship: BusinessRelationship | None = None,
+        q: Annotated[str | None, Query(max_length=100)] = None,
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+        cursor: Annotated[str | None, Query(max_length=20)] = None,
+    ) -> RevenuePaymentPage:
+        require_admin(user, runtime_settings)
+        payments = _filter_revenue_transactions(
+            repo,
+            from_date=from_date,
+            to_date=to_date,
+            status=status,
+            payment_method=payment_method,
+            data_classification=data_classification,
+            relationship=relationship,
+            query=q,
+        )
+        try:
+            start = int(cursor or "0")
+        except ValueError:
+            raise ApiError(422, "invalid_cursor", "The pagination cursor is invalid.") from None
+        selected = payments[start : start + limit]
+        return RevenuePaymentPage(
+            items=selected,
+            next_cursor=str(start + limit) if start + limit < len(payments) else None,
+        )
+
+    @application.get(
+        "/api/admin/revenue/payments/{payment_id}",
+        response_model=RevenuePaymentDetail,
+        tags=["admin"],
+    )
+    def revenue_payment_detail(
+        payment_id: str, user: UserDependency, repo: RepositoryDependency
+    ) -> RevenuePaymentDetail:
+        require_admin(user, runtime_settings)
+        payment = repo.get_billing_transaction(payment_id)
+        if payment is None:
+            raise ApiError(404, "billing_payment_not_found", "The billing payment was not found.")
+        order = next(
+            (
+                item
+                for item in repo.list_billing_orders(payment.business_id)
+                if item.id == payment.billing_order_id
+            ),
+            None,
+        )
+        business = repo.get_business_by_id(payment.business_id) if payment.business_id else None
+        plan = repo.get_founder_plan(payment.business_id) if payment.business_id else None
+        return RevenuePaymentDetail(payment=payment, order=order, business=business, plan=plan)
+
+    @application.get("/api/admin/revenue/export.csv", tags=["admin"])
+    def revenue_export(
+        user: UserDependency,
+        repo: RepositoryDependency,
+        from_date: date | None = None,
+        to_date: date | None = None,
+        status: BillingTransactionStatus | None = None,
+        payment_method: Annotated[str | None, Query(max_length=50)] = None,
+        data_classification: DataClassification | None = None,
+        relationship: BusinessRelationship | None = None,
+        q: Annotated[str | None, Query(max_length=100)] = None,
+    ) -> Response:
+        require_admin(user, runtime_settings)
+        transactions = _filter_revenue_transactions(
+            repo,
+            from_date=from_date,
+            to_date=to_date,
+            status=status,
+            payment_method=payment_method,
+            data_classification=data_classification,
+            relationship=relationship,
+            query=q,
+        )
+        businesses = {business.id: business for business in repo.list_businesses()}
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(
+            [
+                "payment_id",
+                "business",
+                "payer_email",
+                "status",
+                "method",
+                "amount_minor",
+                "refunded_minor",
+                "fee_minor",
+                "tax_minor",
+                "currency",
+                "captured_at",
+            ]
+        )
+        for transaction in transactions:
+            business = businesses.get(transaction.business_id or "")
+            writer.writerow(
+                [
+                    transaction.provider_payment_id,
+                    business.name if business else "Deleted account",
+                    str(transaction.payer_email or ""),
+                    transaction.status.value,
+                    transaction.payment_method or "",
+                    transaction.amount_minor,
+                    transaction.amount_refunded_minor,
+                    transaction.provider_fee_minor,
+                    transaction.provider_tax_minor,
+                    transaction.currency,
+                    transaction.captured_at.isoformat() if transaction.captured_at else "",
+                ]
+            )
+        return Response(
+            content=output.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": 'attachment; filename="cashsathi-revenue.csv"'},
         )
 
     @application.get("/api/admin/impact", response_model=AdminImpactResponse, tags=["admin"])

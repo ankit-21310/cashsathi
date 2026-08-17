@@ -18,7 +18,7 @@ describe("landing page", () => {
     expect(screen.getByText("Disputes stop automation")).toBeInTheDocument();
     expect(screen.getByText("₹299 one-time")).toBeInTheDocument();
     expect(screen.getByText(/10 confirmed invoices/)).toBeInTheDocument();
-    expect(screen.getByText("Manual payment verification")).toBeInTheDocument();
+    expect(screen.getByText("Secure one-time checkout")).toBeInTheDocument();
     expect(screen.getAllByRole("link", { name: "Open secure preview" })[0]).toHaveAttribute(
       "href",
       "/login",

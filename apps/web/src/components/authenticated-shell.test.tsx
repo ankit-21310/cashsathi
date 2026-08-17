@@ -60,6 +60,7 @@ describe("authenticated navigation", () => {
         data_classification: "REAL",
         relationship: "ARMS_LENGTH",
         evidence_pseudonym: "aster",
+        billing_access_mode: "LEGACY",
       },
       membership: {
         business_id: "business-1",
@@ -75,7 +76,7 @@ describe("authenticated navigation", () => {
   it("opens and closes the responsive menu accessibly", async () => {
     render(<AuthenticatedShell><div>Page content</div></AuthenticatedShell>);
 
-    await screen.findByRole("link", { name: "Admin" });
+    await screen.findByRole("link", { name: "Revenue command" });
     const menuButton = screen.getByRole("button", { name: "Menu" });
 
     expect(menuButton).toHaveAttribute("aria-expanded", "false");
@@ -90,7 +91,7 @@ describe("authenticated navigation", () => {
   it("closes the menu after a navigation link is selected", async () => {
     render(<AuthenticatedShell><div>Page content</div></AuthenticatedShell>);
 
-    await screen.findByRole("link", { name: "Admin" });
+    await screen.findByRole("link", { name: "Revenue command" });
     fireEvent.click(screen.getByRole("button", { name: "Menu" }));
     fireEvent.click(screen.getByRole("button", { name: "More" }));
     fireEvent.click(screen.getByRole("link", { name: "Privacy" }));
@@ -101,7 +102,7 @@ describe("authenticated navigation", () => {
   it("groups secondary destinations and account actions into menus", async () => {
     render(<AuthenticatedShell><div>Page content</div></AuthenticatedShell>);
 
-    await screen.findByRole("link", { name: "Admin" });
+    await screen.findByRole("link", { name: "Revenue command" });
     const moreButton = screen.getByRole("button", { name: "More" });
     expect(moreButton).toHaveAttribute("aria-expanded", "false");
     fireEvent.click(moreButton);

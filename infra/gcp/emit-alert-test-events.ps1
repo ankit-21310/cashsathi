@@ -27,6 +27,7 @@ function Write-TestEvent {
 1..2 | ForEach-Object { Write-TestEvent "schema_or_model_failure" "model-$_" }
 Write-TestEvent "gmail_failure" "gmail-1"
 Write-TestEvent "scheduler_failure" "scheduler-1"
+Write-TestEvent "billing_verification_failure" "billing-1"
 
-Write-Output "Synthetic events emitted. Confirm four alert notifications and document the test time."
+Write-Output "Synthetic events emitted. Confirm five alert notifications and document the test time."
 Write-Output "The two-hour scheduler-absence policy must be verified separately during a controlled window."

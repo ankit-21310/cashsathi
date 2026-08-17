@@ -116,7 +116,7 @@ export default function AdminImpactPage() {
 
   return (
     <AuthenticatedShell><main className="dashboard-main">
-      <div className="dashboard-heading"><div><div className="eyebrow">Submission evidence</div><h1>Platform impact</h1></div><div className="button-row"><a className="button button-secondary" href="/admin/validation">Validation workspace</a><button className="button button-primary" onClick={() => void downloadEvidence()}>Download evidence ZIP</button></div></div>
+      <div className="dashboard-heading"><div><div className="eyebrow">Submission evidence</div><h1>Platform impact</h1></div><div className="button-row"><a className="button button-secondary" href="/admin/revenue">Revenue command</a><a className="button button-secondary" href="/admin/validation">Validation workspace</a><button className="button button-primary" onClick={() => void downloadEvidence()}>Download evidence ZIP</button></div></div>
       {error && <div className="alert alert-error">{error}</div>}
       {impact && <section className="metric-grid metric-grid-six">
         <article><span>Arms-length paying businesses</span><strong>{impact.paying_businesses}</strong><small>{impact.related_paying_businesses} related · {impact.preexisting_paying_businesses} pre-existing</small></article>

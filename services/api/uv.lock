@@ -103,6 +103,7 @@ dependencies = [
     { name = "google-cloud-firestore" },
     { name = "google-cloud-kms" },
     { name = "google-genai" },
+    { name = "httpx" },
     { name = "iso4217" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -116,7 +117,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -134,6 +134,7 @@ requires-dist = [
     { name = "google-cloud-firestore", specifier = "==2.28.1" },
     { name = "google-cloud-kms", specifier = "==3.6.0" },
     { name = "google-genai", specifier = "==2.14.0" },
+    { name = "httpx", specifier = "==0.28.1" },
     { name = "iso4217", specifier = "==1.16.20260101" },
     { name = "pydantic", specifier = "==2.13.4" },
     { name = "pydantic-settings", specifier = "==2.15.0" },
@@ -147,7 +148,6 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "httpx", specifier = "==0.28.1" },
     { name = "mypy", specifier = "==2.3.0" },
     { name = "pytest", specifier = "==9.1.1" },
     { name = "pytest-cov", specifier = "==7.0.0" },
