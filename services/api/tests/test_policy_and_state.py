@@ -87,9 +87,7 @@ def test_waiting_for_reply_respects_the_configured_cooldown() -> None:
     )
     # 100 hours since delivery: past the default 72h cooldown, but still inside a
     # business-configured 168h (weekly) cooldown, so the two must disagree.
-    assert (
-        calculate_invoice_state(invoice(), [delivered], now=NOW) == InvoiceState.OVERDUE
-    )
+    assert calculate_invoice_state(invoice(), [delivered], now=NOW) == InvoiceState.OVERDUE
     assert (
         calculate_invoice_state(invoice(), [delivered], now=NOW, cooldown_hours=168)
         == InvoiceState.WAITING_FOR_REPLY

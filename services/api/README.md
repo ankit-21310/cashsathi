@@ -38,9 +38,12 @@ FastAPI service for Firebase authentication, tenant-derived authorization, trans
 - `POST /api/invoices/{invoice_id}/payments`
 - `GET /api/invoices/{invoice_id}/timeline`
 - `GET /api/metrics`
-- `POST /api/jobs/recheck` (Google OIDC only)
+- `GET|POST /api/jobs/recheck` (Vercel cron secret or Google OIDC, by runtime platform)
 - `GET|POST /api/admin/*` (configured Firebase administrators only)
 
-The PDF exists only for the extraction request. OAuth refresh tokens are KMS-encrypted. Evidence events and logs never contain PDF bytes, tokens, raw model/provider responses, or reminder bodies; approval-visible copy remains inside the tenant action record.
+The PDF exists only for the extraction request. OAuth refresh tokens use Google KMS on GCP and
+versioned AES-256-GCM on Vercel. Evidence events and logs never contain PDF bytes, tokens, raw
+model/provider responses, or reminder bodies; approval-visible copy remains inside the tenant
+action record.
 
 When both Firebase emulator hosts point to localhost and the environment is not production, deterministic local adapters support the complete browser journey without external AI, OAuth, KMS, or email calls. Production configuration rejects emulator hosts.

@@ -20,7 +20,11 @@ import {
   User,
 } from "firebase/auth";
 
-import { getPublicEnvironment } from "@/lib/env";
+import {
+  getPublicEnvironment,
+  PREVIEW_DISABLED_MESSAGE,
+  publicAppMode,
+} from "@/lib/env";
 import { getFirebaseAuth } from "@/lib/firebase";
 
 interface AuthContextValue {
@@ -46,11 +50,15 @@ function isMissingResetAccountError(error: unknown): boolean {
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const previewDisabled = publicAppMode() === "preview-disabled";
   const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [configurationError, setConfigurationError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(!previewDisabled);
+  const [configurationError, setConfigurationError] = useState<string | null>(
+    previewDisabled ? PREVIEW_DISABLED_MESSAGE : null,
+  );
 
   useEffect(() => {
+    if (previewDisabled) return;
     let unsubscribe: () => void = () => undefined;
     void Promise.resolve().then(() => {
       try {
@@ -66,7 +74,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     });
     return () => unsubscribe();
-  }, []);
+  }, [previewDisabled]);
 
   const signInWithGoogle = useCallback(async () => {
     await signInWithPopup(getFirebaseAuth(), new GoogleAuthProvider());

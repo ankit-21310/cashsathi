@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { AuthProvider } from "@/components/auth-provider";
-import { publicProductName } from "@/lib/env";
+import { PREVIEW_DISABLED_MESSAGE, publicAppMode, publicProductName } from "@/lib/env";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -26,6 +26,11 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col" suppressHydrationWarning>
+        {publicAppMode() === "preview-disabled" && (
+          <div className="alert alert-error" role="status">
+            {PREVIEW_DISABLED_MESSAGE}
+          </div>
+        )}
         <AuthProvider>{children}</AuthProvider>
       </body>
     </html>

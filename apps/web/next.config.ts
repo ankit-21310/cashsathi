@@ -28,7 +28,7 @@ const csp = [
 
 const nextConfig: NextConfig = {
   distDir: process.env.NEXT_DIST_DIR || ".next",
-  output: "standalone",
+  ...(process.env.NEXT_STANDALONE === "true" ? { output: "standalone" as const } : {}),
   poweredByHeader: false,
   async headers() {
     return [{

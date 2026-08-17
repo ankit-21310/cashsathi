@@ -207,7 +207,7 @@ def test_scheduler_is_oidc_gated_and_repeated_runs_do_not_duplicate_actions(
 ) -> None:
     setup_invoice(client, "-scheduler")
     assert client.post("/api/jobs/recheck").status_code == 401
-    first = client.post("/api/jobs/recheck", headers={"Authorization": "Bearer scheduler-token"})
+    first = client.get("/api/jobs/recheck", headers={"Authorization": "Bearer scheduler-token"})
     assert first.status_code == 200
     assert first.json()["claimed"] == 1
     second = client.post("/api/jobs/recheck", headers={"Authorization": "Bearer scheduler-token"})

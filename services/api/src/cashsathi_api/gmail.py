@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import secrets
 import urllib.error
@@ -9,6 +10,8 @@ import urllib.request
 from email.message import EmailMessage
 from typing import Protocol, cast
 
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from google.api_core import exceptions as google_exceptions
 from google.auth.exceptions import RefreshError
 from google.cloud import kms
@@ -74,6 +77,45 @@ class GoogleKmsTokenCipher:
         return response.plaintext.decode("utf-8")
 
 
+class AesGcmTokenCipher:
+    """Versioned authenticated encryption for Vercel-hosted Gmail refresh tokens."""
+
+    _AAD = b"cashsathi:gmail-refresh-token:v1"
+
+    def __init__(self, settings: Settings) -> None:
+        configured = settings.gmail_token_encryption_key_b64
+        if configured is None:
+            raise GmailUnavailableError("Gmail token encryption key is not configured")
+        try:
+            key = base64.b64decode(configured.get_secret_value(), validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise GmailUnavailableError("Gmail token encryption key is invalid") from exc
+        if len(key) != 32:
+            raise GmailUnavailableError("Gmail token encryption key must be 32 bytes")
+        self._cipher = AESGCM(key)
+        self.key_name = "vercel-env:aes-256-gcm:v1"
+
+    def encrypt(self, plaintext: str) -> str:
+        nonce = secrets.token_bytes(12)
+        encrypted = self._cipher.encrypt(nonce, plaintext.encode("utf-8"), self._AAD)
+        payload = base64.urlsafe_b64encode(nonce + encrypted).decode("ascii").rstrip("=")
+        return f"v1.{payload}"
+
+    def decrypt(self, ciphertext: str) -> str:
+        version, separator, payload = ciphertext.partition(".")
+        if separator != "." or version != "v1" or not payload:
+            raise GmailUnavailableError("Token decryption failed")
+        try:
+            padded = payload + "=" * (-len(payload) % 4)
+            decoded = base64.b64decode(padded, altchars=b"-_", validate=True)
+            if len(decoded) < 29:
+                raise ValueError("Encrypted payload is too short")
+            plaintext = self._cipher.decrypt(decoded[:12], decoded[12:], self._AAD)
+            return plaintext.decode("utf-8")
+        except (binascii.Error, InvalidTag, UnicodeDecodeError, ValueError) as exc:
+            raise GmailUnavailableError("Token decryption failed") from exc
+
+
 class GmailAdapter(Protocol):
     def new_pkce_verifier(self) -> str: ...
 
@@ -94,6 +136,7 @@ class GoogleGmailAdapter:
         self._client_secret = settings.gmail_oauth_client_secret.get_secret_value()
         self._redirect_uri = settings.gmail_oauth_redirect_uri
         self._timeout_seconds = settings.gmail_timeout_seconds
+        self._recipient_allowlist = settings.allowed_gmail_recipients
 
     def _flow(self, code_verifier: str) -> Flow:
         flow = Flow.from_client_config(
@@ -149,6 +192,13 @@ class GoogleGmailAdapter:
         return cast(str, refresh_token)
 
     def send(self, refresh_token: str, recipient: str, subject: str, body: str) -> str:
+        if (
+            self._recipient_allowlist
+            and recipient.strip().casefold() not in self._recipient_allowlist
+        ):
+            raise GmailDefiniteFailure(
+                "recipient_not_allowed", "Gmail delivery is restricted to demo recipients."
+            )
         credentials = Credentials(  # type: ignore[no-untyped-call]
             token=None,
             refresh_token=refresh_token,

@@ -129,6 +129,7 @@ from cashsathi_api.errors import (
 )
 from cashsathi_api.evidence import admin_impact, build_timeline, calculate_metrics
 from cashsathi_api.gmail import (
+    AesGcmTokenCipher,
     GmailAdapter,
     GmailDefiniteFailure,
     GmailUnavailableError,
@@ -160,7 +161,11 @@ from cashsathi_api.phase67 import (
 )
 from cashsathi_api.repository import FirestoreRepository, Repository
 from cashsathi_api.request_guards import RequestGuardsMiddleware
-from cashsathi_api.scheduler_auth import GoogleSchedulerVerifier, SchedulerVerifier
+from cashsathi_api.scheduler_auth import (
+    GoogleSchedulerVerifier,
+    SchedulerVerifier,
+    VercelCronVerifier,
+)
 from cashsathi_api.state_engine import calculate_invoice_state
 from cashsathi_api.workflow import CollectionWorkflow, initial_next_check
 
@@ -376,12 +381,18 @@ def create_app(
             application.state.token_cipher = EmulatorTokenCipher()
         else:
             try:
-                application.state.token_cipher = GoogleKmsTokenCipher(runtime_settings)
+                if runtime_settings.runtime_platform == "vercel":
+                    application.state.token_cipher = AesGcmTokenCipher(runtime_settings)
+                else:
+                    application.state.token_cipher = GoogleKmsTokenCipher(runtime_settings)
             except GmailUnavailableError:
                 application.state.token_cipher = None
-        application.state.scheduler_verifier = scheduler_verifier or GoogleSchedulerVerifier(
-            runtime_settings
-        )
+        if scheduler_verifier is not None:
+            application.state.scheduler_verifier = scheduler_verifier
+        elif runtime_settings.runtime_platform == "vercel":
+            application.state.scheduler_verifier = VercelCronVerifier(runtime_settings)
+        else:
+            application.state.scheduler_verifier = GoogleSchedulerVerifier(runtime_settings)
         yield
 
     application = FastAPI(
@@ -1473,6 +1484,7 @@ def create_app(
         repo.update_automation(tenant, False)
         return GmailStatus(connected=False, automation_enabled=False)
 
+    @application.get("/api/jobs/recheck", response_model=RecheckResult, tags=["jobs"])
     @application.post("/api/jobs/recheck", response_model=RecheckResult, tags=["jobs"])
     async def recheck_due_invoices(
         request: Request,

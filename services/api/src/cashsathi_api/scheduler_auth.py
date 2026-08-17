@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 from typing import Protocol
 
 from google.auth.transport.requests import Request as GoogleAuthRequest
@@ -11,6 +12,25 @@ from cashsathi_api.errors import ApiError
 
 class SchedulerVerifier(Protocol):
     def verify(self, authorization: str | None) -> str: ...
+
+
+class VercelCronVerifier:
+    def __init__(self, settings: Settings) -> None:
+        self._secret = (
+            settings.cron_secret.get_secret_value() if settings.cron_secret is not None else None
+        )
+
+    def verify(self, authorization: str | None) -> str:
+        if not self._secret:
+            raise ApiError(
+                503, "scheduler_not_configured", "Cron authentication is not configured."
+            )
+        scheme, _, token = (authorization or "").partition(" ")
+        if scheme.casefold() != "bearer" or not token:
+            raise ApiError(401, "scheduler_auth_required", "Cron authentication is required.")
+        if not hmac.compare_digest(token, self._secret):
+            raise ApiError(401, "invalid_scheduler_token", "Cron authentication failed.")
+        return "vercel-cron"
 
 
 class GoogleSchedulerVerifier:

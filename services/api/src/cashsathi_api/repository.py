@@ -203,9 +203,7 @@ class Repository(Protocol):
 
     def list_all_action_records(self, tenant: TenantContext | None = None) -> list[Action]: ...
 
-    def list_stale_executing_actions(
-        self, cutoff: datetime, limit: int = 200
-    ) -> list[Action]: ...
+    def list_stale_executing_actions(self, cutoff: datetime, limit: int = 200) -> list[Action]: ...
 
     def list_businesses(self) -> list[Business]: ...
 
@@ -1667,9 +1665,7 @@ class FirestoreRepository:
             for snapshot in self._client.collection_group("actions").stream()
         ]
 
-    def list_stale_executing_actions(
-        self, cutoff: datetime, limit: int = 200
-    ) -> list[Action]:
+    def list_stale_executing_actions(self, cutoff: datetime, limit: int = 200) -> list[Action]:
         snapshots = (
             self._client.collection_group("actions")
             .where("state", "==", ActionState.EXECUTING.value)
@@ -2942,9 +2938,7 @@ class InMemoryRepository:
             and self.invoices[action.invoice_id].business_id == tenant.business_id
         ]
 
-    def list_stale_executing_actions(
-        self, cutoff: datetime, limit: int = 200
-    ) -> list[Action]:
+    def list_stale_executing_actions(self, cutoff: datetime, limit: int = 200) -> list[Action]:
         results = [
             action
             for action in self.actions.values()

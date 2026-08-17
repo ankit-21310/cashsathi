@@ -1,9 +1,12 @@
+import base64
+import binascii
+import json
 import os
 from typing import Any, Protocol
 
 import firebase_admin
 from fastapi import Request
-from firebase_admin import auth
+from firebase_admin import auth, credentials
 
 from cashsathi_api.config import Settings
 from cashsathi_api.domain import AuthenticatedUser
@@ -23,6 +26,22 @@ class FirebaseAccountAuthManager:
         auth.delete_user(uid)
 
 
+def decode_firebase_service_account(settings: Settings) -> dict[str, Any]:
+    encoded = settings.firebase_service_account_json_b64
+    if encoded is None:
+        raise ValueError("Firebase service account is not configured")
+    try:
+        raw = base64.b64decode(encoded.get_secret_value(), validate=True)
+        payload = json.loads(raw.decode("utf-8"))
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Firebase service account is malformed") from exc
+    if not isinstance(payload, dict) or payload.get("type") != "service_account":
+        raise ValueError("Firebase service account is malformed")
+    if payload.get("project_id") != settings.gcp_project_id:
+        raise ValueError("Firebase service account project does not match GCP_PROJECT_ID")
+    return payload
+
+
 def initialize_firebase(settings: Settings) -> None:
     if settings.firebase_auth_emulator_host:
         os.environ.setdefault("FIREBASE_AUTH_EMULATOR_HOST", settings.firebase_auth_emulator_host)
@@ -30,7 +49,13 @@ def initialize_firebase(settings: Settings) -> None:
     try:
         firebase_admin.get_app()
     except ValueError:
-        firebase_admin.initialize_app(options={"projectId": settings.gcp_project_id})
+        credential = None
+        if settings.firebase_service_account_json_b64 is not None:
+            credential = credentials.Certificate(decode_firebase_service_account(settings))
+        firebase_admin.initialize_app(
+            credential=credential,
+            options={"projectId": settings.gcp_project_id},
+        )
 
 
 class FirebaseAuthVerifier:

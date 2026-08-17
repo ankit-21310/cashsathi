@@ -5,6 +5,7 @@ description = "Secure API foundation for the CashSathi receivables operator"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
+  "cryptography==50.0.0",
   "email-validator==2.3.0",
   "fastapi==0.141.1",
   "firebase-admin==7.5.0",

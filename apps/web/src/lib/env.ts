@@ -1,5 +1,10 @@
 import { z } from "zod";
 
+const appModeSchema = z.enum(["local", "production", "preview-disabled"]);
+export type AppMode = z.infer<typeof appModeSchema>;
+
+export const PREVIEW_DISABLED_MESSAGE = "Preview build — live services are disabled.";
+
 const publicEnvironmentSchema = z.object({
   productName: z.string().min(2).max(80),
   apiBaseUrl: z.url().transform((value) => value.replace(/\/$/, "")),
@@ -16,7 +21,15 @@ const publicEnvironmentSchema = z.object({
 
 export type PublicEnvironment = z.infer<typeof publicEnvironmentSchema>;
 
+export function publicAppMode(): AppMode {
+  const fallback = process.env.NODE_ENV === "production" ? "production" : "local";
+  return appModeSchema.parse(process.env.NEXT_PUBLIC_APP_MODE ?? fallback);
+}
+
 export function getPublicEnvironment(): PublicEnvironment {
+  if (publicAppMode() === "preview-disabled") {
+    throw new Error(PREVIEW_DISABLED_MESSAGE);
+  }
   return publicEnvironmentSchema.parse({
     productName: process.env.NEXT_PUBLIC_PRODUCT_NAME,
     apiBaseUrl: process.env.NEXT_PUBLIC_API_BASE_URL,

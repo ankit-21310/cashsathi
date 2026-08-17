@@ -221,8 +221,10 @@ The final gate reruns linting, type checking, tests, and the production build; v
 evidence archive and submission assets; and writes an untracked checksum manifest under
 `release-artifacts/`. It does not deploy, publish, tag, or submit the project.
 
-Use the [cloud setup guide](docs/operations/cloud-setup.md) and
-[production runbook](docs/operations/production-runbook.md) for deployment. The
+Use the [Vercel Hobby deployment guide](docs/operations/vercel-deployment.md) for the
+no-billing demo path. The [cloud setup guide](docs/operations/cloud-setup.md) preserves the
+future GCP deployment, and the [production runbook](docs/operations/production-runbook.md)
+covers operations. The
 [Phase 8 package](docs/submission/phase-8-package.md) records the repository-controlled
 submission narrative and outstanding evidence requirements.
 

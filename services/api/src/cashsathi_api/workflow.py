@@ -561,9 +561,7 @@ class CollectionWorkflow:
         for action in self._repo.list_stale_executing_actions(cutoff):
             if not action.business_id:
                 continue
-            tenant = TenantContext(
-                "cloud-scheduler", action.business_id, MembershipRole.OWNER
-            )
+            tenant = TenantContext("cloud-scheduler", action.business_id, MembershipRole.OWNER)
             invoice = self._repo.get_invoice(tenant, action.invoice_id)
             unknown = action.model_copy(
                 update={

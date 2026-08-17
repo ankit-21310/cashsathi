@@ -18,6 +18,7 @@ playwright-report/
 .ruff_cache/
 .firebase/
 .firebase-data/
+.vercel/
 
 # Local configuration and credentials
 .env

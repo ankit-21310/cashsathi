@@ -1,5 +1,5 @@
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from cashsathi_api.config import Settings
 from cashsathi_api.domain import PolicyDefaults
@@ -40,6 +40,7 @@ def test_strict_production_validates_integrations_scheduler_and_admin() -> None:
         Settings(
             app_env="production",
             strict_production_readiness=True,
+            runtime_platform="gcp",
             gcp_project_id="cashsathi-production",
             cors_allowed_origins="https://web.example.test",
             web_base_url="https://web.example.test",
@@ -54,3 +55,43 @@ def test_strict_production_validates_integrations_scheduler_and_admin() -> None:
             scheduler_audience="http://api.example.test",
             platform_admin_uids="admin-uid",
         )
+
+
+def test_strict_vercel_production_requires_provider_specific_secrets() -> None:
+    with pytest.raises(ValidationError, match="Firebase service account"):
+        Settings(
+            app_env="production",
+            runtime_platform="vercel",
+            strict_production_readiness=True,
+            gcp_project_id="cashsathi",
+            cors_allowed_origins="https://cashsathi-web.vercel.app",
+            web_base_url="https://cashsathi-web.vercel.app",
+            firebase_auth_emulator_host=None,
+            firestore_emulator_host=None,
+            gemini_api_key="configured",
+            gmail_oauth_client_id="configured",
+            gmail_oauth_client_secret="configured",
+            gmail_oauth_redirect_uri="https://cashsathi-api.vercel.app/api/integrations/gmail/callback",
+            platform_admin_uids="admin-uid",
+        )
+
+    settings = Settings(
+        app_env="production",
+        runtime_platform="vercel",
+        strict_production_readiness=True,
+        gcp_project_id="cashsathi",
+        cors_allowed_origins="https://cashsathi-web.vercel.app",
+        web_base_url="https://cashsathi-web.vercel.app",
+        firebase_auth_emulator_host=None,
+        firestore_emulator_host=None,
+        firebase_service_account_json_b64=SecretStr("configured"),
+        gemini_api_key="configured",
+        gmail_oauth_client_id="configured",
+        gmail_oauth_client_secret="configured",
+        gmail_oauth_redirect_uri="https://cashsathi-api.vercel.app/api/integrations/gmail/callback",
+        gmail_token_encryption_key_b64="configured",
+        gmail_recipient_allowlist="demo@example.test",
+        cron_secret="configured",
+        platform_admin_uids="admin-uid",
+    )
+    assert settings.runtime_platform == "vercel"

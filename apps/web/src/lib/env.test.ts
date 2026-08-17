@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 
-import { getPublicEnvironment } from "@/lib/env";
+import {
+  getPublicEnvironment,
+  PREVIEW_DISABLED_MESSAGE,
+  publicAppMode,
+} from "@/lib/env";
 
 const original = { ...process.env };
 
@@ -10,6 +14,7 @@ afterEach(() => {
 
 describe("public environment", () => {
   it("validates and normalizes browser configuration", () => {
+    process.env.NEXT_PUBLIC_APP_MODE = "local";
     process.env.NEXT_PUBLIC_PRODUCT_NAME = "Receivables Operator Preview";
     process.env.NEXT_PUBLIC_API_BASE_URL = "http://localhost:8000/";
     process.env.NEXT_PUBLIC_FIREBASE_API_KEY = "test";
@@ -23,5 +28,12 @@ describe("public environment", () => {
     const environment = getPublicEnvironment();
     expect(environment.apiBaseUrl).toBe("http://localhost:8000");
     expect(environment.useFirebaseEmulator).toBe(true);
+  });
+
+  it("disables live configuration for preview deployments", () => {
+    process.env.NEXT_PUBLIC_APP_MODE = "preview-disabled";
+
+    expect(publicAppMode()).toBe("preview-disabled");
+    expect(() => getPublicEnvironment()).toThrow(PREVIEW_DISABLED_MESSAGE);
   });
 });

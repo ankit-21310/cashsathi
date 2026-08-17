@@ -1,4 +1,17 @@
 {
+  "auth": {
+    "providers": {
+      "anonymous": false,
+      "emailPassword": true,
+      "googleSignIn": {
+        "oAuthBrandDisplayName": "CashSathi Demo",
+        "supportEmail": "ankit21310@iiitd.ac.in",
+        "authorizedRedirectUris": [
+          "https://cashsathi-web.vercel.app"
+        ]
+      }
+    }
+  },
   "firestore": {
     "database": "(default)",
     "location": "asia-south1",

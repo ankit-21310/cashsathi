@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import os
 from types import SimpleNamespace
 from typing import Any
 
@@ -13,6 +15,7 @@ from cashsathi_api.config import Settings
 from cashsathi_api.domain import ExtractedInvoiceDraft
 from cashsathi_api.errors import ApiError
 from cashsathi_api.gmail import (
+    AesGcmTokenCipher,
     GmailAmbiguousFailure,
     GmailDefiniteFailure,
     GmailUnavailableError,
@@ -20,7 +23,7 @@ from cashsathi_api.gmail import (
     GoogleKmsTokenCipher,
 )
 from cashsathi_api.invoice_processing import GeminiInvoiceExtractor, ValidatedPdf
-from cashsathi_api.scheduler_auth import GoogleSchedulerVerifier
+from cashsathi_api.scheduler_auth import GoogleSchedulerVerifier, VercelCronVerifier
 
 
 class FakeModels:
@@ -144,7 +147,64 @@ def gmail_adapter() -> GoogleGmailAdapter:
     adapter._client_secret = "test-secret"
     adapter._redirect_uri = "https://api.example.test/api/integrations/gmail/callback"
     adapter._timeout_seconds = 5
+    adapter._recipient_allowlist = set()
     return adapter
+
+
+def test_aes_gcm_cipher_round_trip_and_fail_closed_validation() -> None:
+    settings = Settings(
+        app_env="test",
+        gmail_token_encryption_key_b64=base64.b64encode(os.urandom(32)).decode("ascii"),
+    )
+    cipher = AesGcmTokenCipher(settings)
+    encrypted = cipher.encrypt("private-refresh-token")
+
+    assert encrypted.startswith("v1.")
+    assert "private-refresh-token" not in encrypted
+    assert cipher.decrypt(encrypted) == "private-refresh-token"
+
+    payload = encrypted.removeprefix("v1.")
+    decoded = bytearray(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    decoded[-1] ^= 1
+    tampered = "v1." + base64.urlsafe_b64encode(decoded).decode().rstrip("=")
+    with pytest.raises(GmailUnavailableError, match="Token decryption failed"):
+        cipher.decrypt(tampered)
+    with pytest.raises(GmailUnavailableError, match="Token decryption failed"):
+        cipher.decrypt(encrypted.replace("v1.", "v2.", 1))
+
+
+@pytest.mark.parametrize("encoded", ["not-base64!", base64.b64encode(b"too-short").decode()])
+def test_aes_gcm_cipher_rejects_invalid_keys(encoded: str) -> None:
+    with pytest.raises(GmailUnavailableError, match="encryption key"):
+        AesGcmTokenCipher(Settings(app_env="test", gmail_token_encryption_key_b64=encoded))
+
+
+def test_gmail_rejects_recipient_outside_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = gmail_adapter()
+    adapter._recipient_allowlist = {"allowed@example.test"}
+    monkeypatch.setattr(
+        gmail_module,
+        "build",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Gmail was called")),
+    )
+
+    with pytest.raises(GmailDefiniteFailure) as error:
+        adapter.send("refresh-token", "other@example.test", "Reminder", "Body")
+
+    assert error.value.code == "recipient_not_allowed"
+
+
+def test_vercel_cron_uses_constant_time_bearer_secret() -> None:
+    verifier = VercelCronVerifier(Settings(app_env="test", cron_secret="cron-test-secret"))
+    assert verifier.verify("Bearer cron-test-secret") == "vercel-cron"
+
+    with pytest.raises(ApiError) as missing:
+        verifier.verify(None)
+    assert missing.value.status_code == 401
+
+    with pytest.raises(ApiError) as invalid:
+        verifier.verify("Bearer wrong-secret")
+    assert invalid.value.status_code == 401
 
 
 @pytest.mark.parametrize(

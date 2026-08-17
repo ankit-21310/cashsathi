@@ -21,12 +21,14 @@ class Settings(BaseSettings):
     )
 
     app_env: Literal["development", "test", "production"] = "development"
+    runtime_platform: Literal["local", "gcp", "vercel"] = "local"
     gcp_project_id: str = Field(default="cashsathi-local", min_length=3)
     firestore_database_id: str = "(default)"
     cors_allowed_origins: str = "http://localhost:3000"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     firebase_auth_emulator_host: str | None = None
     firestore_emulator_host: str | None = None
+    firebase_service_account_json_b64: SecretStr | None = None
     gemini_api_key: SecretStr | None = None
     gemini_model: str = "gemini-3.6-flash"
     extraction_prompt_version: str = "invoice-extraction-v1"
@@ -40,9 +42,12 @@ class Settings(BaseSettings):
     gmail_oauth_client_secret: SecretStr | None = None
     gmail_oauth_redirect_uri: str = "http://localhost:8000/api/integrations/gmail/callback"
     gmail_kms_key_name: str | None = None
+    gmail_token_encryption_key_b64: SecretStr | None = None
+    gmail_recipient_allowlist: str = ""
     gmail_timeout_seconds: int = Field(default=20, ge=5, le=60)
     scheduler_service_account_email: str | None = None
     scheduler_audience: str | None = None
+    cron_secret: SecretStr | None = None
     scheduler_batch_size: int = Field(default=20, ge=1, le=100)
     scheduler_concurrency: int = Field(default=3, ge=1, le=10)
     action_execution_timeout_minutes: int = Field(default=10, ge=1, le=60)
@@ -65,6 +70,14 @@ class Settings(BaseSettings):
     @property
     def admin_uids(self) -> set[str]:
         return {uid.strip() for uid in self.platform_admin_uids.split(",") if uid.strip()}
+
+    @property
+    def allowed_gmail_recipients(self) -> set[str]:
+        return {
+            recipient.strip().casefold()
+            for recipient in self.gmail_recipient_allowlist.split(",")
+            if recipient.strip()
+        }
 
     @property
     def local_emulators_enabled(self) -> bool:
@@ -109,17 +122,35 @@ class Settings(BaseSettings):
                 "Gemini API key": self.gemini_api_key,
                 "Gmail OAuth client ID": self.gmail_oauth_client_id,
                 "Gmail OAuth client secret": self.gmail_oauth_client_secret,
-                "Gmail KMS key": self.gmail_kms_key_name,
-                "scheduler service account": self.scheduler_service_account_email,
-                "scheduler audience": self.scheduler_audience,
                 "platform administrator": self.platform_admin_uids,
             }
+            if self.runtime_platform == "gcp":
+                required.update(
+                    {
+                        "Gmail KMS key": self.gmail_kms_key_name,
+                        "scheduler service account": self.scheduler_service_account_email,
+                        "scheduler audience": self.scheduler_audience,
+                    }
+                )
+            elif self.runtime_platform == "vercel":
+                required.update(
+                    {
+                        "Firebase service account": self.firebase_service_account_json_b64,
+                        "Gmail token encryption key": self.gmail_token_encryption_key_b64,
+                        "cron secret": self.cron_secret,
+                        "Gmail recipient allowlist": self.gmail_recipient_allowlist,
+                    }
+                )
+            else:
+                required["deployed runtime platform"] = None
             missing = [name for name, value in required.items() if not value]
             if missing:
                 raise ValueError("Strict production readiness requires: " + ", ".join(missing))
             if not self.gmail_oauth_redirect_uri.startswith("https://"):
                 raise ValueError("Strict production Gmail redirect URI must use HTTPS")
-            if not str(self.scheduler_audience).startswith("https://"):
+            if self.runtime_platform == "gcp" and not str(self.scheduler_audience).startswith(
+                "https://"
+            ):
                 raise ValueError("Strict production scheduler audience must use HTTPS")
         return self
 
